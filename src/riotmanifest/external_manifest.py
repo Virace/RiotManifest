@@ -4,7 +4,7 @@
 # @Site    : x-item.com
 # @Software: Pycharm
 # @Create  : 2024/9/3 13:39
-# @Update  : 2024/9/6 7:33
+# @Update  : 2024/9/9 16:04
 # @Detail  : 
 
 import os
@@ -151,48 +151,55 @@ class ResourceDL:
         检查游戏资源是否加载
         :return:
         """
-        if not self.rgd.lcu.available_regions():
+        if not self.rgd.available_lcu_regions():
             self.rgd.load_game_data()
             self.rgd.load_lcu_data()
 
-    def download_game_resources(self, game_filter: str = ""):
+            logger.debug(f'ONLINE LCU VERSION: {self.rgd.latest_lcu()["version"]}')
+            logger.debug(f'ONLINE GAME VERSION: {self.rgd.latest_game()["version"]}')
+
+    def download_game_resources(self, game_filter: str = "", unfilter: str = ""):
         """
         下载GAME资源
         :param game_filter:
+        :param unfilter:
         :return:
         """
         self._check_rgd()
         game_data = self.rgd.latest_game()
-        logger.debug(f"LCU: {game_data.version}")
+        logger.debug(f"LCU: {game_data['version']}")
 
         try:
             if self.d_game:
                 self.mdl.run(
-                    game_data.url,
+                    game_data['url'],
                     self.out_dir / "Game",
                     pattern=f"{game_filter}",
                     retries=self.max_retries,
+                    exclude=f"{unfilter}",
                 )
         except Exception as e:
             logger.error(f"下载游戏资源失败: {e}")
 
-    def download_lcu_resources(self, lcu_filter: str = ""):
+    def download_lcu_resources(self, lcu_filter: str = "", unfilter: str = ""):
         """
         下载LCU资源
         :param lcu_filter:
+        :param unfilter:
         :return:
         """
         self._check_rgd()
-        lcu_data = self.rgd.lastest_lcu()
-        logger.debug(f"GAME: {lcu_data.version}")
+        lcu_data = self.rgd.latest_lcu()
+        logger.debug(f"GAME: {lcu_data['version']}")
 
         try:
             if self.d_lcu:
                 self.mdl.run(
-                    lcu_data.url,
+                    lcu_data['version'],
                     self.out_dir / "LeagueClient",
                     pattern=lcu_filter,
                     retries=self.max_retries,
+                    exclude=f"{unfilter}",
                 )
         except Exception as e:
             logger.error(f"下载 LCU 资源失败: {e}")

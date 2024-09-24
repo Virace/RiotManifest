@@ -4,10 +4,10 @@
 # @Site    : x-item.com
 # @Software: Pycharm
 # @Create  : 2024/9/2 11:54
-# @Update  : 2024/9/5 16:25
+# @Update  : 2024/9/9 22:03
 # @Detail  : 
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from league_tools.formats import WAD, WadHeaderAnalyzer
 from loguru import logger
@@ -19,30 +19,54 @@ class WADExtractor:
 
     V3_HEADER_MINI_SIZE = 4 + 268 + 4
 
-    def __init__(self, manifest_file: str, bundle_url: str = None, output_dir: str = None):
+    _instances = {}
+
+    def __new__(cls, manifest: Union[PatcherManifest, str], bundle_url: str = None, output_dir: str = None):
+        # 创建一个唯一的键，用于存储实例
+        # 如果 manifest 是 PatcherManifest 实例，使用其标识符（例如文件路径）作为键的一部分
+        key = (manifest if isinstance(manifest, str) else manifest.file, bundle_url, output_dir)
+        if key not in cls._instances:
+            instance = super(WADExtractor, cls).__new__(cls)
+            cls._instances[key] = instance
+        return cls._instances[key]
+
+    def __init__(self, manifest: Union[PatcherManifest, str], bundle_url: str = None, output_dir: str = None):
         """
         初始化WADExtractor实例。
 
-        :param manifest_file: 清单文件路径或URL（必须）。
+        :param manifest: 清单文件实例，或路径、URL（必须）。
         :param bundle_url: 资源文件的基础URL（可选）。
         :param output_dir: 文件保存的目录（可选）。
         """
-        self.manifest_file = manifest_file
-        self.bundle_url = bundle_url
-        self.output_dir = output_dir
+        if not hasattr(self, '_initialized'):
+            self.bundle_url = bundle_url
+            self.output_dir = output_dir
 
-        # 构建传递给 PatcherManifest 的参数字典
-        manifest_kwargs = {"file": manifest_file, "path": ""}
-        if output_dir:
-            manifest_kwargs["path"] = output_dir
-        if bundle_url:
-            manifest_kwargs["bundle_url"] = bundle_url
+            if isinstance(manifest, PatcherManifest):
+                self.manifest = manifest
+            elif isinstance(manifest, str):
+                # 构建传递给 PatcherManifest 的参数字典
+                manifest_kwargs = {"file": manifest, "path": ""}
+                if output_dir:
+                    manifest_kwargs["path"] = output_dir
+                if bundle_url:
+                    manifest_kwargs["bundle_url"] = bundle_url
 
-        # 初始化 PatcherManifest
-        self.manifest = PatcherManifest(**manifest_kwargs)
-        logger.debug(
-            f"WADExtractor实例已初始化 - 清单文件: {manifest_file}, 资源URL: {bundle_url}, 输出目录: {output_dir}"
-        )
+                # 初始化 PatcherManifest
+                self.manifest = PatcherManifest(**manifest_kwargs)
+            else:
+                raise ValueError('不支持的类型')
+
+            logger.debug(
+                f"WADExtractor实例已初始化 - 清单文件: {manifest}, 资源URL: {bundle_url}, 输出目录: {output_dir}"
+            )
+            self._initialized = True
+
+    def __reduce__(self):
+        # 为了确保在反序列化时正确地重建对象，使用 manifest 的标识符
+        manifest_identifier = self.manifest if isinstance(self.manifest, str) else self.manifest.file
+        return self.__class__, (manifest_identifier, self.bundle_url, self.output_dir)
+
 
     def extract_files(self, wad_file_paths: Dict[str, List[str]]) -> Dict[str, Dict[str, Optional[bytes]]]:
         """

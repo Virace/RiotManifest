@@ -4,7 +4,7 @@
 # @Site    : x-item.com
 # @Software: Pycharm
 # @Create  : 2024/3/12 22:46
-# @Update  : 2024/9/5 16:29
+# @Update  : 2024/9/9 22:03
 # @Detail  : manifest.py
 
 import asyncio
@@ -330,6 +330,7 @@ class PatcherManifest:
         :param bundle_url:
         :param concurrency_limit:
         """
+        self.file = file
         self.bundles: Iterable[PatcherBundle] = {}
         self.chunks: Dict[int, PatcherChunk] = {}
         self.flags: Dict[int, str] = {}
