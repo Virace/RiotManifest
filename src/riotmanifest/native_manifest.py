@@ -4,7 +4,7 @@
 # @Site    : x-item.com
 # @Software: Pycharm
 # @Create  : 2024/3/12 22:46
-# @Update  : 2024/9/9 22:03
+# @Update  : 2025/3/11 16:17
 # @Detail  : manifest.py
 
 import asyncio
@@ -488,35 +488,26 @@ class PatcherManifest:
             yield entry_parser(parser)
             parser.seek(pos + 4)
 
-    def _parse_bundle(self, parser):
+    @classmethod
+    def _parse_bundle(cls, parser):
         """Parse a bundle entry"""
 
-        def parse_chunklist(_parser):
-            _fields = self._parse_field_table(
-                _parser,
-                (
-                    ("chunk_id", "<Q"),
-                    ("compressed_size", "<L"),
-                    ("uncompressed_size", "<L"),
-                ),
-            )
-            return (
-                _fields["chunk_id"],
-                _fields["compressed_size"],
-                _fields["uncompressed_size"],
-            )
+        def parse_chunklist(_):
+            fields = cls._parse_field_table(parser, (
+                ('chunk_id', '<Q'),
+                ('compressed_size', '<L'),
+                ('uncompressed_size', '<L'),
+            ))
+            return fields['chunk_id'], fields['compressed_size'], fields['uncompressed_size']
 
-        fields = self._parse_field_table(
-            parser,
-            (
-                ("bundle_id", "<Q"),
-                ("chunks_offset", "offset"),
-            ),
-        )
+        fields = cls._parse_field_table(parser, (
+            ('bundle_id', '<Q'),
+            ('chunks_offset', 'offset'),
+        ))
 
-        bundle = PatcherBundle(fields["bundle_id"])
-        parser.seek(fields["chunks_offset"])
-        for chunk_id, compressed_size, uncompressed_size in self._parse_table(parser, parse_chunklist):
+        bundle = PatcherBundle(fields['bundle_id'])
+        parser.seek(fields['chunks_offset'])
+        for (chunk_id, compressed_size, uncompressed_size) in cls._parse_table(parser, parse_chunklist):
             bundle.add_chunk(chunk_id, compressed_size, uncompressed_size)
 
         return bundle
@@ -524,10 +515,7 @@ class PatcherManifest:
     @staticmethod
     def _parse_flag(parser):
         parser.skip(4)  # skip offset table offset
-        (
-            flag_id,
-            offset,
-        ) = parser.unpack("<xxxBl")
+        flag_id, offset, = parser.unpack('<xxxBl')
         parser.skip(offset - 4)
         return flag_id, parser.unpack_string()
 
@@ -536,71 +524,56 @@ class PatcherManifest:
         """Parse a file entry
         (name, link, flag_ids, directory_id, filesize, chunk_ids)
         """
-        fields = cls._parse_field_table(
-            parser,
-            (
-                ("file_id", "<Q"),
-                ("directory_id", "<Q"),
-                ("file_size", "<L"),
-                ("name", "str"),
-                ("flags", "<Q"),
-                None,
-                None,
-                ("chunks", "offset"),
-                None,
-                ("link", "str"),
-                None,
-                None,
-                None,
-            ),
-        )
+        fields = cls._parse_field_table(parser, (
+            ('file_id', '<Q'),
+            ('directory_id', '<Q'),
+            ('file_size', '<L'),
+            ('name', 'str'),
+            ('flags', '<Q'),
+            None,
+            None,
+            ('chunks', 'offset'),
+            None,
+            ('link', 'str'),
+            None,
+            None,
+            None,
+        ))
 
-        flag_mask = fields["flags"]
+        flag_mask = fields['flags']
         if flag_mask:
-            flag_ids = [i + 1 for i in range(64) if flag_mask & (1 << i)]
+            flag_ids = [i+1 for i in range(64) if flag_mask & (1 << i)]
         else:
             flag_ids = None
 
-        parser.seek(fields["chunks"])
-        (chunk_count,) = parser.unpack("<L")  # _ == 0
-        chunk_ids = list(parser.unpack(f"<{chunk_count}Q"))
+        parser.seek(fields['chunks'])
+        chunk_count, = parser.unpack('<L')  # _ == 0
+        chunk_ids = list(parser.unpack(f'<{chunk_count}Q'))
 
-        return (
-            fields["name"],
-            fields["link"],
-            flag_ids,
-            fields["directory_id"],
-            fields["file_size"],
-            chunk_ids,
-        )
+        return fields['name'], fields['link'], flag_ids, fields['directory_id'], fields['file_size'], chunk_ids
 
     @classmethod
     def _parse_directory(cls, parser):
         """Parse a directory entry
         (name, directory_id, parent_id)
         """
-        fields = cls._parse_field_table(
-            parser,
-            (
-                ("directory_id", "<Q"),
-                ("parent_id", "<Q"),
-                ("name", "str"),
-            ),
-        )
-        return fields["name"], fields["directory_id"], fields["parent_id"]
+        fields = cls._parse_field_table(parser, (
+            ('directory_id', '<Q'),
+            ('parent_id', '<Q'),
+            ('name', 'str'),
+        ))
+        return fields['name'], fields['directory_id'], fields['parent_id']
 
     @staticmethod
-    def _parse_field_table(
-        parser: BinaryParser, fields: Tuple[Optional[Tuple[str, str]], ...]
-    ) -> Dict[str, Optional[Union[str, int]]]:
+    def _parse_field_table(parser, fields):
         entry_pos = parser.tell()
-        fields_pos = entry_pos - parser.unpack("<l")[0]
+        fields_pos = entry_pos - parser.unpack('<l')[0]
         nfields = len(fields)
         output = {}
         parser.seek(fields_pos)
-        parser.skip(2)  # vtable size
-        parser.skip(2)  # object size
-        for _, field, offset in zip(range(nfields), fields, parser.unpack(f"<{nfields}H")):
+        parser.skip(2) # vtable size
+        parser.skip(2) # object size
+        for _, field, offset in zip(range(nfields), fields, parser.unpack(f'<{nfields}H')):
             if field is None:
                 continue
             name, fmt = field
@@ -609,10 +582,10 @@ class PatcherManifest:
             else:
                 pos = entry_pos + offset
                 parser.seek(pos)
-                if fmt == "offset":
-                    value = pos + parser.unpack("<l")[0]
-                elif fmt == "str":
-                    value = parser.unpack("<l")[0]
+                if fmt == 'offset':
+                    value = pos + parser.unpack('<l')[0]
+                elif fmt == 'str':
+                    value = parser.unpack('<l')[0]
                     parser.seek(pos + value)
                     value = parser.unpack_string()
                 else:
