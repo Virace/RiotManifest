@@ -52,23 +52,6 @@ if __name__ == '__main__':
 ![](https://s2.loli.net/2024/03/16/PUzxQq4sgmp5h2c.png)
 
 
-- **ManifestDownloader外壳**
-```python
-
-from riotmanifest.external_manifest import ResourceDL
-
-rdl = ResourceDL(r'E:\out')
-rdl.d_game = True
-rdl.download_resources('content-metadata.json')
-```
-
-直接调用开源程序[Morilli/ManifestDownloader](https://github.com/Morilli/ManifestDownloader)直接下载，具体查看函数文档
-
-自动从GitHub下载可执行文件，保存至temp目录，默认使用代理
- 
- 
-
-
 - WADExtractor
 
 ```python
@@ -103,7 +86,6 @@ print(len(data))
 
 ### 感谢
 - [@CommunityDragon](https://github.com/CommunityDragon/CDTB), **CDTB**
-- [@Morilli](https://github.com/Morilli/ManifestDownloader), **ManifestDownloader**
 
 - 以及**JetBrains**提供开发环境支持
   

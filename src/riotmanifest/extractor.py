@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Union
 from league_tools.formats import WAD, WadHeaderAnalyzer
 from loguru import logger
 
-from riotmanifest.native_manifest import PatcherFile, PatcherManifest
+from riotmanifest.manifest import PatcherFile, PatcherManifest
 
 
 class WADExtractor:

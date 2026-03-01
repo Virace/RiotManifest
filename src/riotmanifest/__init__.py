@@ -9,10 +9,9 @@
 
 from loguru import logger
 
-from riotmanifest.external_manifest import ManifestDL, ResourceDL
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import RiotGameData
-from riotmanifest.native_manifest import (
+from riotmanifest.manifest import (
     BinaryParser,
     DecompressError,
     DownloadError,
@@ -32,8 +31,6 @@ __all__ = [
     "PatcherBundle",
     "PatcherFile",
     "PatcherManifest",
-    "ManifestDL",
-    "ResourceDL",
     "WADExtractor",
     "RiotGameData",
 ]

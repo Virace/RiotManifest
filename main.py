@@ -12,7 +12,6 @@ from typing import Union
 from pathlib import Path
 
 from riotmanifest import RiotGameData, WADExtractor
-from riotmanifest.external_manifest import ResourceDL
 from loguru import logger
 
 logger.configure(handlers=[dict(sink=sys.stdout, level="DEBUG")])
@@ -34,11 +33,6 @@ def extra_test():
         }
     )
     print(len(data))
-
-def test_re_dl():
-    rdl = ResourceDL(r'C:\Users\Virace\Downloads\Programs\1')
-    rdl.d_game = True
-    rdl.download_game_resources('content-metadata.json')
 
 def test_game_data():
     rgd = RiotGameData()
@@ -77,5 +71,4 @@ if __name__ == "__main__":
     #     logger.info(f"开始下载...{file.name}")
     #     manifest.download_file(file)
     #     logger.info(f"下载完毕...{file.name}")
-
 
