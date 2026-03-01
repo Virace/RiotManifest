@@ -8,12 +8,15 @@
 # @Detail  : manifest.py
 
 import asyncio
+from collections import OrderedDict
 import hashlib
 import io
 import os
 import os.path
 import re
 import struct
+import threading
+from dataclasses import dataclass, field
 from typing import BinaryIO, Iterable, Optional, Tuple
 from typing import Dict, List, Union
 from urllib.parse import urljoin, urlparse
@@ -111,6 +114,74 @@ class PatcherBundle:
         self.chunks.append(PatcherChunk(chunk_id, self, offset, size, target_size))
 
 
+@dataclass
+class WriteTarget:
+    file: "PatcherFile"
+    file_offset: int
+    expected_len: int
+
+
+@dataclass
+class GlobalChunkTask:
+    chunk: PatcherChunk
+    targets: List[WriteTarget] = field(default_factory=list)
+
+
+@dataclass
+class ChunkRange:
+    start: int
+    end: int
+    tasks: List[GlobalChunkTask] = field(default_factory=list)
+
+
+@dataclass
+class BundleJob:
+    bundle_id: int
+    ranges: List[ChunkRange] = field(default_factory=list)
+
+
+class FileHandlePool:
+    """轻量文件句柄池，避免每次写入都重复 open/close。"""
+
+    def __init__(self, max_handles: int = 500):
+        self.max_handles = max(1, max_handles)
+        self._handles: "OrderedDict[str, Tuple[BinaryIO, threading.Lock]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def _get(self, path: StrPath) -> Tuple[BinaryIO, threading.Lock]:
+        norm_path = os.fspath(path)
+        with self._lock:
+            if norm_path in self._handles:
+                file_obj, file_lock = self._handles.pop(norm_path)
+                self._handles[norm_path] = (file_obj, file_lock)
+                return file_obj, file_lock
+
+            while len(self._handles) >= self.max_handles:
+                _, (old_file, old_lock) = self._handles.popitem(last=False)
+                with old_lock:
+                    old_file.close()
+
+            file_obj = open(norm_path, "r+b", buffering=0)
+            file_lock = threading.Lock()
+            self._handles[norm_path] = (file_obj, file_lock)
+            return file_obj, file_lock
+
+    def write_at(self, path: StrPath, data: bytes, offset: int):
+        file_obj, file_lock = self._get(path)
+        with file_lock:
+            file_obj.seek(offset)
+            file_obj.write(data)
+
+    def close(self):
+        with self._lock:
+            handles = list(self._handles.values())
+            self._handles.clear()
+
+        for file_obj, file_lock in handles:
+            with file_lock:
+                file_obj.close()
+
+
 class PatcherFile:
     def __init__(
         self,
@@ -140,7 +211,6 @@ class PatcherFile:
         self.manifest: "PatcherManifest" = manifest
 
         self.chunk_cache = {}
-        self.lock = asyncio.Lock()
 
     def hexdigest(self):
         """Compute a hash unique for this file content"""
@@ -161,106 +231,31 @@ class PatcherFile:
             lang = langs.lower()  # compare lowercased
             return lambda f: f.flags is not None and any(f.lower() == lang for f in f.flags)
 
-    async def _download_chunks(self, chunks: List[PatcherChunk], concurrency_limit: int):
-        """
-        下载一系列的chunks并将它们保存到缓存中
-
-        :param chunks: 需要下载的chunks列表
-        :type chunks: List[PatcherChunk]
-        """
-        # 自定义并发，防止遇到网站审计
-        connector = aiohttp.TCPConnector(limit=concurrency_limit)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            tasks = [self._download_chunk(session, chunk, chunk.offset, chunk.size) for chunk in chunks]
-            await asyncio.gather(*tasks)
-
-    async def _download_chunk(
-        self,
-        session: aiohttp.ClientSession,
-        chunk: PatcherChunk,
-        offset: int,
-        size: int,
-    ):
-        """
-        下载一个chunk并返回其内容
-
-        :param session: aiohttp的ClientSession实例，用于发送HTTP请求
-        :param chunk: 需要下载的chunk
-        :param offset: chunk在bundle中的偏移量
-        :param size: chunk的大小
-        :return: 下载的chunk的内容
-        """
-        async with self.lock:
-            if chunk.chunk_id in self.chunk_cache:
-                return self.chunk_cache[chunk.chunk_id]
-
-        url = urljoin(self.manifest.bundle_url, f"{chunk.bundle.bundle_id:016X}.bundle")
-        for i in range(RETRY_LIMIT):
-            try:
-                async with session.get(url, headers={"Range": f"bytes={offset}-{offset + size - 1}"}) as res:
-                    res.raise_for_status()
-                    content = await res.read()
-                    if len(content) != size:
-                        raise DownloadError(
-                            f"下载的chunk {chunk.chunk_id}失败，得到了 {len(content)} 字节，期望 {size} 字节，bundle_id为 {chunk.bundle.bundle_id}"
-                        )
-                    break
-            except aiohttp.ClientError as e:
-                if i == RETRY_LIMIT - 1:
-                    raise DownloadError(
-                        f"在 {RETRY_LIMIT} 次尝试后，下载chunk {chunk.chunk_id}失败，bundle_id为 {chunk.bundle.bundle_id}"
-                    ) from e
-                await asyncio.sleep(5)
-
-        try:
-            data = pyzstd.decompress(content)
-        except pyzstd.ZstdError as e:
-            raise DecompressError(f"解压缩chunk {chunk.chunk_id}时出错，bundle_id为 {chunk.bundle.bundle_id}") from e
-
-        async with self.lock:
-            self.chunk_cache[chunk.chunk_id] = data
-
-        return data
-
     def _verify_file(self, path: StrPath) -> bool:
         """
-        检查文件是否与chunks匹配
+        按文件大小进行快速校验。
 
         :param path: 文件路径
-        :return: 如果文件需要下载，则返回True；否则，返回False
+        :return: 校验通过返回 True，否则返回 False。
         """
-
-        if os.path.exists(path) and os.path.getsize(path) == sum(chunk.target_size for chunk in self.chunks):
+        if os.path.isfile(path) and os.path.getsize(path) == self.size:
             logger.info(f"{self.name}，校验通过")
             return True
         return False
 
     async def download_file(self, path: StrPath, concurrency_limit: Optional[int] = None) -> bool:
         """
-        下载一个文件并将其保存到磁盘
+        下载一个文件（委托给 Manifest 的全局调度器）。
+
         :param path: 保存文件的路径
         :param concurrency_limit: 并发数
         """
-        output = os.path.join(path, self.name)
-
-        if self._verify_file(output):
-            return True
-
-        os.makedirs(os.path.dirname(output), exist_ok=True)
-
-        try:
-            await self._download_chunks(self.chunks, concurrency_limit or self.manifest.concurrency_limit)
-        except (DownloadError, DecompressError) as e:
-            logger.error(f"下载文件 {self.name} 时出错: {str(e)}")
-            return False
-
-        with open(output, "wb+") as f:
-            for chunk in self.chunks:
-                f.write(self.chunk_cache[chunk.chunk_id])
-
-        status = self._verify_file(path)
-        logger.info(f"下载文件 {self.name} 完成, 状态: {status}")
-        return status
+        self.manifest.path = path
+        results = await self.manifest.download_files_concurrently(
+            [self],
+            concurrency_limit=concurrency_limit or self.manifest.concurrency_limit,
+        )
+        return bool(results and results[0])
 
     def download_chunk(self, chunk: "PatcherChunk") -> bytes:
         """
@@ -317,6 +312,10 @@ class PatcherFile:
 
 
 class PatcherManifest:
+    DEFAULT_GAP_TOLERANCE = 32 * 1024
+    DEFAULT_MAX_RANGES_PER_REQUEST = 30
+    CONTENT_RANGE_REGEX = re.compile(r"^bytes\s+(\d+)-(\d+)/(?:\d+|\*)$", re.I)
+
     def __init__(
         self,
         file: Optional[StrPath],
@@ -339,6 +338,8 @@ class PatcherManifest:
         self.path = path
         self.bundle_url = bundle_url
         self.concurrency_limit = concurrency_limit
+        self.gap_tolerance = self.DEFAULT_GAP_TOLERANCE
+        self.max_ranges_per_request = self.DEFAULT_MAX_RANGES_PER_REQUEST
 
         # file 不能为空
         if not file:
@@ -354,6 +355,270 @@ class PatcherManifest:
         else:
             # 文件错误
             raise ValueError("file error")
+
+    def _file_output(self, file: PatcherFile) -> str:
+        return os.path.join(self.path, file.name)
+
+    @staticmethod
+    def _is_complete_file(file: PatcherFile, output: StrPath) -> bool:
+        return os.path.isfile(output) and os.path.getsize(output) == file.size
+
+    def _preallocate_file(self, file: PatcherFile):
+        output = self._file_output(file)
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        with open(output, "wb") as f:
+            f.truncate(file.size)
+
+    def _build_global_task_map(self, files: List[PatcherFile]) -> Dict[int, List[GlobalChunkTask]]:
+        chunk_index: Dict[int, GlobalChunkTask] = {}
+
+        for file in files:
+            file_offset = 0
+            for chunk in file.chunks:
+                target = WriteTarget(
+                    file=file,
+                    file_offset=file_offset,
+                    expected_len=chunk.target_size,
+                )
+                if chunk.chunk_id in chunk_index:
+                    chunk_index[chunk.chunk_id].targets.append(target)
+                else:
+                    chunk_index[chunk.chunk_id] = GlobalChunkTask(chunk=chunk, targets=[target])
+                file_offset += chunk.target_size
+
+        bundle_map: Dict[int, List[GlobalChunkTask]] = {}
+        for task in chunk_index.values():
+            bundle_id = task.chunk.bundle.bundle_id
+            bundle_map.setdefault(bundle_id, []).append(task)
+
+        for tasks in bundle_map.values():
+            tasks.sort(key=lambda t: t.chunk.offset)
+        return bundle_map
+
+    @staticmethod
+    def _merge_ranges(tasks: List[GlobalChunkTask], gap_tolerance: int) -> List[ChunkRange]:
+        valid_tasks = [task for task in tasks if task.chunk.size > 0]
+        if not valid_tasks:
+            return []
+
+        ranges: List[ChunkRange] = []
+        start = valid_tasks[0].chunk.offset
+        end = start + valid_tasks[0].chunk.size - 1
+        current_tasks: List[GlobalChunkTask] = [valid_tasks[0]]
+
+        for task in valid_tasks[1:]:
+            task_start = task.chunk.offset
+            task_end = task_start + task.chunk.size - 1
+            gap = task_start - (end + 1)
+            if gap <= gap_tolerance:
+                end = task_end
+                current_tasks.append(task)
+            else:
+                ranges.append(ChunkRange(start=start, end=end, tasks=current_tasks))
+                start = task_start
+                end = task_end
+                current_tasks = [task]
+
+        ranges.append(ChunkRange(start=start, end=end, tasks=current_tasks))
+        return ranges
+
+    def _build_bundle_jobs(self, files: List[PatcherFile]) -> List[BundleJob]:
+        bundle_map = self._build_global_task_map(files)
+        jobs: List[BundleJob] = []
+
+        for bundle_id, tasks in bundle_map.items():
+            ranges = self._merge_ranges(tasks, self.gap_tolerance)
+            if not ranges:
+                continue
+            for i in range(0, len(ranges), self.max_ranges_per_request):
+                jobs.append(BundleJob(bundle_id=bundle_id, ranges=ranges[i : i + self.max_ranges_per_request]))
+
+        return jobs
+
+    @staticmethod
+    def _build_range_header(ranges: List[ChunkRange]) -> str:
+        return "bytes=" + ",".join(f"{chunk_range.start}-{chunk_range.end}" for chunk_range in ranges)
+
+    @staticmethod
+    def _extract_ranges_from_full_body(payload: bytes, ranges: List[ChunkRange], bundle_id: int) -> List[bytes]:
+        outputs: List[bytes] = []
+        payload_len = len(payload)
+        for chunk_range in ranges:
+            if payload_len < chunk_range.end + 1:
+                raise DownloadError(
+                    f"完整内容不足以切片range: bundle_id={bundle_id}, range={chunk_range.start}-{chunk_range.end}, "
+                    f"payload_len={payload_len}"
+                )
+            outputs.append(payload[chunk_range.start : chunk_range.end + 1])
+        return outputs
+
+    async def _parse_multipart_response(
+        self,
+        response: aiohttp.ClientResponse,
+        ranges: List[ChunkRange],
+        bundle_id: int,
+    ) -> List[bytes]:
+        reader = aiohttp.MultipartReader.from_response(response)
+        index_by_range = {(chunk_range.start, chunk_range.end): idx for idx, chunk_range in enumerate(ranges)}
+        mapped_parts: List[Optional[bytes]] = [None] * len(ranges)
+        fallback_parts: List[bytes] = []
+
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+
+            payload = await part.read(decode=False)
+            content_range = part.headers.get(aiohttp.hdrs.CONTENT_RANGE, "").strip()
+
+            mapped = False
+            if content_range:
+                match = self.CONTENT_RANGE_REGEX.match(content_range)
+                if match:
+                    start = int(match.group(1))
+                    end = int(match.group(2))
+                    idx = index_by_range.get((start, end))
+                    if idx is not None and mapped_parts[idx] is None:
+                        mapped_parts[idx] = payload
+                        mapped = True
+
+            if not mapped:
+                fallback_parts.append(payload)
+
+        for idx, value in enumerate(mapped_parts):
+            if value is None:
+                if not fallback_parts:
+                    raise DownloadError(
+                        f"multipart段数不足: bundle_id={bundle_id}, expected={len(ranges)}"
+                    )
+                mapped_parts[idx] = fallback_parts.pop(0)
+
+        if fallback_parts:
+            raise DownloadError(
+                f"multipart段数过多: bundle_id={bundle_id}, expected={len(ranges)}, actual>{len(ranges)}"
+            )
+
+        return [part for part in mapped_parts if part is not None]
+
+    async def _fetch_ranges_data(
+        self,
+        session: aiohttp.ClientSession,
+        bundle_id: int,
+        ranges: List[ChunkRange],
+    ) -> List[bytes]:
+        if not ranges:
+            return []
+
+        url = urljoin(self.bundle_url, f"{bundle_id:016X}.bundle")
+        range_header = self._build_range_header(ranges)
+
+        for attempt in range(RETRY_LIMIT):
+            try:
+                headers = {
+                    "Range": range_header,
+                    "Accept-Encoding": "identity",
+                }
+
+                async with session.get(url, headers=headers) as response:
+                    if response.status not in (200, 206):
+                        raise DownloadError(f"HTTP状态异常: {response.status}, bundle_id={bundle_id}")
+
+                    if response.status == 200:
+                        payload = await response.read()
+                        range_payloads = self._extract_ranges_from_full_body(payload, ranges, bundle_id)
+                    else:
+                        content_type = response.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").lower()
+                        if content_type.startswith("multipart/"):
+                            range_payloads = await self._parse_multipart_response(response, ranges, bundle_id)
+                        else:
+                            payload = await response.read()
+                            if len(ranges) != 1:
+                                raise DownloadError(
+                                    f"多段range未返回multipart: bundle_id={bundle_id}, ranges={len(ranges)}"
+                                )
+                            range_payloads = [payload]
+
+                    if len(range_payloads) != len(ranges):
+                        raise DownloadError(
+                            f"range响应数量不匹配: bundle_id={bundle_id}, expected={len(ranges)}, "
+                            f"actual={len(range_payloads)}"
+                        )
+
+                    for chunk_range, payload in zip(ranges, range_payloads):
+                        expected_size = chunk_range.end - chunk_range.start + 1
+                        if len(payload) != expected_size:
+                            raise DownloadError(
+                                f"下载range失败: bundle_id={bundle_id}, range={chunk_range.start}-{chunk_range.end}, "
+                                f"actual={len(payload)}, expected={expected_size}"
+                            )
+                    return range_payloads
+            except (aiohttp.ClientError, asyncio.TimeoutError, DownloadError) as e:
+                if attempt == RETRY_LIMIT - 1:
+                    raise DownloadError(f"下载 bundle {bundle_id:016X} ranges 失败: {e}") from e
+                await asyncio.sleep(attempt + 1)
+
+        raise DownloadError(f"下载 bundle {bundle_id:016X} ranges 失败")
+
+    async def _process_bundle_job(
+        self,
+        session: aiohttp.ClientSession,
+        job: BundleJob,
+        file_pool: FileHandlePool,
+    ):
+        range_payloads = await self._fetch_ranges_data(
+            session=session,
+            bundle_id=job.bundle_id,
+            ranges=job.ranges,
+        )
+
+        for chunk_range, range_data in zip(job.ranges, range_payloads):
+
+            for task in chunk_range.tasks:
+                chunk = task.chunk
+                offset_in_range = chunk.offset - chunk_range.start
+                end = offset_in_range + chunk.size
+
+                if end > len(range_data):
+                    raise DownloadError(
+                        f"range数据截断: bundle_id={job.bundle_id}, chunk_id={chunk.chunk_id}, "
+                        f"offset={offset_in_range}, size={chunk.size}, data_len={len(range_data)}"
+                    )
+
+                compressed = range_data[offset_in_range:end]
+
+                try:
+                    data = await asyncio.to_thread(pyzstd.decompress, compressed)
+                except pyzstd.ZstdError as e:
+                    raise DecompressError(
+                        f"解压chunk失败: chunk_id={chunk.chunk_id}, bundle_id={chunk.bundle.bundle_id}"
+                    ) from e
+
+                for target in task.targets:
+                    if len(data) != target.expected_len:
+                        raise DecompressError(
+                            f"解压大小不匹配: chunk_id={chunk.chunk_id}, expected={target.expected_len}, actual={len(data)}"
+                        )
+
+                    output = self._file_output(target.file)
+                    await asyncio.to_thread(file_pool.write_at, output, data, target.file_offset)
+
+    async def _run_bundle_job_with_retry(
+        self,
+        session: aiohttp.ClientSession,
+        job: BundleJob,
+        file_pool: FileHandlePool,
+    ):
+        last_error: Optional[Exception] = None
+        for attempt in range(RETRY_LIMIT):
+            try:
+                await self._process_bundle_job(session=session, job=job, file_pool=file_pool)
+                return
+            except (DownloadError, DecompressError, OSError) as e:
+                last_error = e
+                if attempt == RETRY_LIMIT - 1:
+                    break
+                await asyncio.sleep(attempt + 1)
+        raise DownloadError(f"bundle任务失败: bundle_id={job.bundle_id}, error={last_error}")
 
     def filter_files(
         self, pattern: Optional[str] = None, flag: Union[str, List[str], None] = None
@@ -402,24 +667,88 @@ class PatcherManifest:
 
     async def download_files_concurrently(self, files: List[PatcherFile], concurrency_limit: int = 10) -> Tuple[bool]:
         """
-        并发下载多个文件, 并发数别设置太大，会被限制
+        全局并发下载多个文件。
 
-        :param files: 需要下载的文件列表，每个元素都是一个PatcherFile实例
-        :param concurrency_limit: 并发下载任务的数量限制，默认为10
-        :return: 一个元组，包含所有下载结果的布尔值
+        关键策略：
+        1. 先按 ChunkID 全局去重，再按 Bundle 分组。
+        2. 对同一 Bundle 的 chunk 进行范围合并，减少小 Range 请求数量。
+        3. 下载后按写入目标扇出到多个文件，避免重复下载/重复解压。
+
+        :param files: 需要下载的文件列表。
+        :param concurrency_limit: Bundle 任务并发数。
+        :return: 每个文件下载后的状态（顺序与入参一致）。
         """
-        # 创建一个信号量，限制并发下载任务的数量
-        sem = asyncio.Semaphore(concurrency_limit)
+        if not files:
+            return tuple()
 
-        # 创建一个包含所有下载任务的列表
-        tasks = []
+        # 保持输入顺序去重，避免重复统计同一文件
+        seen_files: Dict[str, PatcherFile] = {}
+        ordered_files: List[PatcherFile] = []
         for file in files:
-            # 使用信号量限制并发下载任务的数量
-            async with sem:
-                tasks.append(file.download_file(path=self.path, concurrency_limit=50))
+            if file.name not in seen_files:
+                seen_files[file.name] = file
+                ordered_files.append(file)
 
-        # 使用 asyncio.gather 并发运行所有下载任务
-        return await asyncio.gather(*tasks)
+        pending_files: List[PatcherFile] = []
+        for file in ordered_files:
+            if file.link:
+                continue
+            output = self._file_output(file)
+            if not self._is_complete_file(file, output):
+                self._preallocate_file(file)
+                pending_files.append(file)
+
+        # 全部已完成或均为link文件
+        if not pending_files:
+            return tuple(self._is_complete_file(file, self._file_output(file)) or bool(file.link) for file in files)
+
+        jobs = self._build_bundle_jobs(pending_files)
+        if not jobs:
+            return tuple(self._is_complete_file(file, self._file_output(file)) or bool(file.link) for file in files)
+
+        worker_count = max(1, min(concurrency_limit or self.concurrency_limit, len(jobs)))
+        connector = aiohttp.TCPConnector(
+            limit=max(worker_count * 4, 16),
+            limit_per_host=max(worker_count * 4, 16),
+        )
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
+        file_pool = FileHandlePool(max_handles=max(worker_count * 8, 256))
+
+        queue: asyncio.Queue = asyncio.Queue()
+        for job in jobs:
+            queue.put_nowait(job)
+
+        errors: List[Tuple[int, Exception]] = []
+        error_lock = asyncio.Lock()
+
+        async def worker():
+            while True:
+                try:
+                    job = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+                try:
+                    await self._run_bundle_job_with_retry(session=session, job=job, file_pool=file_pool)
+                except Exception as exc:
+                    async with error_lock:
+                        errors.append((job.bundle_id, exc))
+                finally:
+                    queue.task_done()
+
+        try:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
+                await queue.join()
+                await asyncio.gather(*workers)
+        finally:
+            await asyncio.to_thread(file_pool.close)
+
+        if errors:
+            for bundle_id, exc in errors:
+                logger.error(f"bundle下载失败: {bundle_id:016X}, error={exc}")
+
+        return tuple(self._is_complete_file(file, self._file_output(file)) or bool(file.link) for file in files)
 
     def parse_rman(self, f: BinaryIO):
         parser = BinaryParser(f)
@@ -427,7 +756,7 @@ class PatcherManifest:
         magic, version_major, version_minor = parser.unpack("<4sBB")
         if magic != b"RMAN":
             raise ValueError("invalid magic code")
-        if (version_major, version_minor) != (2, 0):
+        if (version_major, version_minor) not in ((2, 0), (2, 1)):
             raise ValueError(f"unsupported RMAN version: {version_major}.{version_minor}")
 
         flags, offset, length, _manifest_id, _body_length = parser.unpack("<HLLQL")
@@ -568,16 +897,18 @@ class PatcherManifest:
     def _parse_field_table(parser, fields):
         entry_pos = parser.tell()
         fields_pos = entry_pos - parser.unpack('<l')[0]
-        nfields = len(fields)
         output = {}
         parser.seek(fields_pos)
-        parser.skip(2) # vtable size
-        parser.skip(2) # object size
-        for _, field, offset in zip(range(nfields), fields, parser.unpack(f'<{nfields}H')):
+        vtable_size = parser.unpack('<H')[0]
+        parser.skip(2)  # object size
+        noffsets = (vtable_size - 4) // 2
+        offsets = parser.unpack(f'<{noffsets}H')
+
+        for i, field in enumerate(fields):
             if field is None:
                 continue
             name, fmt = field
-            if offset == 0 or fmt is None:
+            if i >= noffsets or (offset := offsets[i]) == 0 or fmt is None:
                 value = None
             else:
                 pos = entry_pos + offset
