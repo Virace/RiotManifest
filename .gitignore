@@ -160,3 +160,4 @@ cython_debug/
 .idea/
 .vscode/
 .ai_memory/
+.CODING_STYLE.md

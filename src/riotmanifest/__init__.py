@@ -15,6 +15,7 @@ from riotmanifest.http_client import HttpClientError
 from riotmanifest.manifest import (
     BinaryParser,
     DecompressError,
+    DownloadBatchError,
     DownloadError,
     PatcherBundle,
     PatcherChunk,
@@ -26,6 +27,7 @@ logger.disable("riotmanifest")
 
 __all__ = [
     "DownloadError",
+    "DownloadBatchError",
     "DecompressError",
     "BinaryParser",
     "PatcherChunk",

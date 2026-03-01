@@ -10,6 +10,7 @@
 import asyncio
 from collections import OrderedDict
 import hashlib
+import hmac
 import io
 import os
 import os.path
@@ -26,7 +27,16 @@ import pyzstd
 from loguru import logger
 from riotmanifest.http_client import HttpClientError, http_get_bytes
 
+try:
+    import blake3
+except ImportError:
+    blake3 = None
+
 RETRY_LIMIT = 5
+HASH_TYPE_SHA512 = 1
+HASH_TYPE_SHA256 = 2
+HASH_TYPE_HKDF = 3
+HASH_TYPE_BLAKE3 = 4
 
 StrPath = Union[str, "os.PathLike[str]"]
 
@@ -37,6 +47,28 @@ class DownloadError(Exception):
 
 class DecompressError(Exception):
     pass
+
+
+@dataclass
+class BundleJobFailure:
+    bundle_id: int
+    error: Exception
+
+
+class DownloadBatchError(DownloadError):
+    """批量下载存在失败任务时抛出的异常。"""
+
+    def __init__(self, failures: List[BundleJobFailure]):
+        """初始化批量下载异常。
+
+        Args:
+            failures: 失败的 bundle 任务列表。
+        """
+        self.failures = failures
+        summary = ", ".join(f"{failure.bundle_id:016X}:{failure.error}" for failure in failures[:5])
+        if len(failures) > 5:
+            summary = f"{summary}, ... total={len(failures)}"
+        super().__init__(f"存在 {len(failures)} 个 bundle 任务失败: {summary}")
 
 
 class BinaryParser:
@@ -119,6 +151,8 @@ class WriteTarget:
     file: "PatcherFile"
     file_offset: int
     expected_len: int
+    chunk_id: int
+    hash_type: int
 
 
 @dataclass
@@ -140,46 +174,89 @@ class BundleJob:
     ranges: List[ChunkRange] = field(default_factory=list)
 
 
+@dataclass
+class _HandleEntry:
+    file_obj: BinaryIO
+    file_lock: threading.Lock
+    refs: int = 0
+    evicted: bool = False
+
+
 class FileHandlePool:
     """轻量文件句柄池，避免每次写入都重复 open/close。"""
 
     def __init__(self, max_handles: int = 500):
         self.max_handles = max(1, max_handles)
-        self._handles: "OrderedDict[str, Tuple[BinaryIO, threading.Lock]]" = OrderedDict()
+        self._handles: "OrderedDict[str, _HandleEntry]" = OrderedDict()
         self._lock = threading.Lock()
 
-    def _get(self, path: StrPath) -> Tuple[BinaryIO, threading.Lock]:
+    @staticmethod
+    def _close_entry(entry: _HandleEntry):
+        with entry.file_lock:
+            entry.file_obj.close()
+
+    def _evict_one_locked(self) -> List[_HandleEntry]:
+        if not self._handles:
+            return []
+
+        _, entry = self._handles.popitem(last=False)
+        entry.evicted = True
+        if entry.refs == 0:
+            return [entry]
+        return []
+
+    def _acquire(self, path: StrPath) -> _HandleEntry:
         norm_path = os.fspath(path)
+        to_close: List[_HandleEntry] = []
+        entry: Optional[_HandleEntry] = None
+        try:
+            with self._lock:
+                if norm_path in self._handles:
+                    entry = self._handles.pop(norm_path)
+                    entry.refs += 1
+                    self._handles[norm_path] = entry
+                    return entry
+
+                while len(self._handles) >= self.max_handles:
+                    to_close.extend(self._evict_one_locked())
+
+                file_obj = open(norm_path, "r+b", buffering=0)
+                entry = _HandleEntry(file_obj=file_obj, file_lock=threading.Lock(), refs=1)
+                self._handles[norm_path] = entry
+                return entry
+        finally:
+            for close_entry in to_close:
+                self._close_entry(close_entry)
+
+    def _release(self, entry: _HandleEntry):
+        should_close = False
         with self._lock:
-            if norm_path in self._handles:
-                file_obj, file_lock = self._handles.pop(norm_path)
-                self._handles[norm_path] = (file_obj, file_lock)
-                return file_obj, file_lock
-
-            while len(self._handles) >= self.max_handles:
-                _, (old_file, old_lock) = self._handles.popitem(last=False)
-                with old_lock:
-                    old_file.close()
-
-            file_obj = open(norm_path, "r+b", buffering=0)
-            file_lock = threading.Lock()
-            self._handles[norm_path] = (file_obj, file_lock)
-            return file_obj, file_lock
+            entry.refs -= 1
+            should_close = entry.refs == 0 and entry.evicted
+        if should_close:
+            self._close_entry(entry)
 
     def write_at(self, path: StrPath, data: bytes, offset: int):
-        file_obj, file_lock = self._get(path)
-        with file_lock:
-            file_obj.seek(offset)
-            file_obj.write(data)
+        entry = self._acquire(path)
+        try:
+            with entry.file_lock:
+                entry.file_obj.seek(offset)
+                entry.file_obj.write(data)
+        finally:
+            self._release(entry)
 
     def close(self):
+        to_close: List[_HandleEntry] = []
         with self._lock:
             handles = list(self._handles.values())
             self._handles.clear()
+            for entry in handles:
+                entry.evicted = True
+                if entry.refs == 0:
+                    to_close.append(entry)
 
-        for file_obj, file_lock in handles:
-            with file_lock:
-                file_obj.close()
+        for entry in to_close:
+            self._close_entry(entry)
 
 
 class PatcherFile:
@@ -191,16 +268,21 @@ class PatcherFile:
         flags: Optional[List[str]],
         chunks: List[PatcherChunk],
         manifest: "PatcherManifest",
+        chunk_hash_types: Optional[Dict[int, int]] = None,
     ):
-        """
-        Patch file, 可以直接调用download_file方法下载文件, 注意是异步方法
+        """初始化补丁文件对象。
 
-        hexdigest() ,并不是文件的哈希,而是由文件的chunks的chunk_id组成的哈希, 可以再未下载时判断文件是否相同
-        :param name:
-        :param size:
-        :param link:
-        :param flags:
-        :param chunks:
+        `hexdigest()` 不是文件字节哈希，而是由 chunk_id 列表计算出的摘要，
+        可用于下载前判断文件内容是否一致。
+
+        Args:
+            name: 文件相对路径。
+            size: 文件字节大小。
+            link: 链接文件目标（为空表示普通文件）。
+            flags: 文件标志列表。
+            chunks: 文件对应的 chunk 列表。
+            manifest: 所属 manifest 对象。
+            chunk_hash_types: chunk_id 到 hash_type 的映射。
         """
         self.name: str = name
         self.size: int = size
@@ -209,6 +291,7 @@ class PatcherFile:
 
         self.chunks: List[PatcherChunk] = chunks
         self.manifest: "PatcherManifest" = manifest
+        self.chunk_hash_types: Dict[int, int] = chunk_hash_types or {}
 
         self.chunk_cache = {}
 
@@ -244,27 +327,34 @@ class PatcherFile:
         return False
 
     async def download_file(self, path: StrPath, concurrency_limit: Optional[int] = None) -> bool:
-        """
-        下载一个文件（委托给 Manifest 的全局调度器）。
+        """下载单个文件（委托给 Manifest 全局调度器）。
 
-        :param path: 保存文件的路径
-        :param concurrency_limit: 并发数
+        Args:
+            path: 文件保存目录。
+            concurrency_limit: 覆盖 manifest 默认并发数；为 None 时使用 manifest 配置。
+
+        Returns:
+            下载成功返回 True，否则返回 False。
         """
         self.manifest.path = path
         results = await self.manifest.download_files_concurrently(
             [self],
-            concurrency_limit=concurrency_limit or self.manifest.concurrency_limit,
+            concurrency_limit=concurrency_limit,
         )
         return bool(results and results[0])
 
     def download_chunk(self, chunk: "PatcherChunk") -> bytes:
-        """
-        下载一个chunk并返回其解压缩后的内容（同步方法）。
+        """下载并解压单个 chunk（同步方法）。
 
-        :param chunk: 需要下载的PatcherChunk对象。
-        :return: 解压缩后的chunk内容字节数据。
-        :raises DownloadError: 在达到重试限制后仍然无法成功下载时抛出。
-        :raises DecompressError: 在解压缩过程中发生错误时抛出。
+        Args:
+            chunk: 需要下载的 chunk 对象。
+
+        Returns:
+            解压后的 chunk 字节数据。
+
+        Raises:
+            DownloadError: 下载重试耗尽后仍失败。
+            DecompressError: 解压或哈希校验失败。
         """
         if chunk.chunk_id in self.chunk_cache:
             return self.chunk_cache[chunk.chunk_id]
@@ -293,6 +383,13 @@ class PatcherFile:
         except pyzstd.ZstdError as e:
             raise DecompressError(f"解压缩chunk {chunk.chunk_id}时出错，bundle_id为 {chunk.bundle.bundle_id}") from e
 
+        hash_type = self.chunk_hash_types.get(chunk.chunk_id, 0)
+        self.manifest._validate_chunk_hash(  # pylint: disable=protected-access
+            chunk_data=decompressed_data,
+            chunk_id=chunk.chunk_id,
+            hash_type=hash_type,
+        )
+
         self.chunk_cache[chunk.chunk_id] = decompressed_data
         return decompressed_data
 
@@ -312,6 +409,9 @@ class PatcherFile:
 class PatcherManifest:
     DEFAULT_GAP_TOLERANCE = 32 * 1024
     DEFAULT_MAX_RANGES_PER_REQUEST = 30
+    DEFAULT_MIN_TRANSFER_SPEED_BYTES = 50 * 1024
+    DEFAULT_BASE_TIMEOUT_SECONDS = 30
+    DEFAULT_MAX_TIMEOUT_SECONDS = 10 * 60
     CONTENT_RANGE_REGEX = re.compile(r"^bytes\s+(\d+)-(\d+)/(?:\d+|\*)$", re.I)
 
     def __init__(
@@ -320,12 +420,19 @@ class PatcherManifest:
         path: StrPath,
         bundle_url: str = "https://lol.dyn.riotcdn.net/channels/public/bundles/",
         concurrency_limit: int = 50,
+        max_retries: int = RETRY_LIMIT,
     ):
-        """
+        """初始化 manifest 对象并完成解析。
 
-        :param file:
-        :param bundle_url:
-        :param concurrency_limit:
+        Args:
+            file: 本地 manifest 路径或远程 manifest URL。
+            path: 输出目录。
+            bundle_url: bundle 基础 URL。
+            concurrency_limit: 默认 bundle 并发数。
+            max_retries: 单个 bundle 任务最大重试次数。
+
+        Raises:
+            ValueError: file 为空或路径无效时抛出。
         """
         self.file = file
         self.bundles: Iterable[PatcherBundle] = {}
@@ -338,6 +445,7 @@ class PatcherManifest:
         self.concurrency_limit = concurrency_limit
         self.gap_tolerance = self.DEFAULT_GAP_TOLERANCE
         self.max_ranges_per_request = self.DEFAULT_MAX_RANGES_PER_REQUEST
+        self.max_retries = max(1, max_retries)
 
         # file 不能为空
         if not file:
@@ -376,6 +484,8 @@ class PatcherManifest:
                     file=file,
                     file_offset=file_offset,
                     expected_len=chunk.target_size,
+                    chunk_id=chunk.chunk_id,
+                    hash_type=file.chunk_hash_types.get(chunk.chunk_id, 0),
                 )
                 if chunk.chunk_id in chunk_index:
                     chunk_index[chunk.chunk_id].targets.append(target)
@@ -435,6 +545,56 @@ class PatcherManifest:
     @staticmethod
     def _build_range_header(ranges: List[ChunkRange]) -> str:
         return "bytes=" + ",".join(f"{chunk_range.start}-{chunk_range.end}" for chunk_range in ranges)
+
+    @classmethod
+    def _dynamic_request_timeout(cls, total_bytes: int) -> aiohttp.ClientTimeout:
+        """按请求数据量计算动态超时。"""
+        size_factor = total_bytes / float(cls.DEFAULT_MIN_TRANSFER_SPEED_BYTES)
+        timeout_seconds = cls.DEFAULT_BASE_TIMEOUT_SECONDS + int(size_factor)
+        timeout_seconds = min(timeout_seconds, cls.DEFAULT_MAX_TIMEOUT_SECONDS)
+        timeout_seconds = max(timeout_seconds, cls.DEFAULT_BASE_TIMEOUT_SECONDS)
+        return aiohttp.ClientTimeout(total=timeout_seconds, sock_connect=30, sock_read=None)
+
+    @staticmethod
+    def _hkdf_hash(chunk_data: bytes) -> int:
+        """按 RMAN 规则计算 HKDF 派生哈希（uint64）。"""
+        prk = hashlib.sha256(chunk_data).digest()
+        buffer = hmac.new(prk, b"\x00\x00\x00\x01", hashlib.sha256).digest()
+        result = int.from_bytes(buffer[:8], "little")
+        for _ in range(31):
+            buffer = hmac.new(prk, buffer, hashlib.sha256).digest()
+            result ^= int.from_bytes(buffer[:8], "little")
+        return result
+
+    @staticmethod
+    def _compute_chunk_hash(chunk_data: bytes, hash_type: int) -> Optional[int]:
+        """按 hash_type 计算 chunk 哈希并返回 uint64。"""
+        if hash_type == HASH_TYPE_SHA256:
+            digest = hashlib.sha256(chunk_data).digest()
+            return int.from_bytes(digest[:8], "little")
+        if hash_type == HASH_TYPE_SHA512:
+            digest = hashlib.sha512(chunk_data).digest()
+            return int.from_bytes(digest[:8], "little")
+        if hash_type == HASH_TYPE_HKDF:
+            return PatcherManifest._hkdf_hash(chunk_data)
+        if hash_type == HASH_TYPE_BLAKE3:
+            if blake3 is None:
+                raise DecompressError("缺少 blake3 依赖，无法校验 Blake3 Chunk 哈希")
+            digest = blake3.blake3(chunk_data).digest()
+            return int.from_bytes(digest[:8], "little")
+        if hash_type == 0:
+            return None
+        raise DecompressError(f"不支持的 Chunk 哈希类型: {hash_type}")
+
+    def _validate_chunk_hash(self, chunk_data: bytes, chunk_id: int, hash_type: int):
+        """校验解压后的 chunk 数据哈希是否与 chunk_id 一致。"""
+        computed = self._compute_chunk_hash(chunk_data, hash_type)
+        if computed is None:
+            return
+        if computed != chunk_id:
+            raise DecompressError(
+                f"Chunk 哈希校验失败: hash_type={hash_type}, computed={computed:016X}, expected={chunk_id:016X}"
+            )
 
     @staticmethod
     def _extract_ranges_from_full_body(payload: bytes, ranges: List[ChunkRange], bundle_id: int) -> List[bytes]:
@@ -508,53 +668,50 @@ class PatcherManifest:
 
         url = urljoin(self.bundle_url, f"{bundle_id:016X}.bundle")
         range_header = self._build_range_header(ranges)
+        total_bytes = sum(chunk_range.end - chunk_range.start + 1 for chunk_range in ranges)
+        request_timeout = self._dynamic_request_timeout(total_bytes)
 
-        for attempt in range(RETRY_LIMIT):
-            try:
-                headers = {
-                    "Range": range_header,
-                    "Accept-Encoding": "identity",
-                }
+        try:
+            headers = {
+                "Range": range_header,
+                "Accept-Encoding": "identity",
+            }
 
-                async with session.get(url, headers=headers) as response:
-                    if response.status not in (200, 206):
-                        raise DownloadError(f"HTTP状态异常: {response.status}, bundle_id={bundle_id}")
+            async with session.get(url, headers=headers, timeout=request_timeout) as response:
+                if response.status not in (200, 206):
+                    raise DownloadError(f"HTTP状态异常: {response.status}, bundle_id={bundle_id}")
 
-                    if response.status == 200:
-                        payload = await response.read()
-                        range_payloads = self._extract_ranges_from_full_body(payload, ranges, bundle_id)
+                if response.status == 200:
+                    payload = await response.read()
+                    range_payloads = self._extract_ranges_from_full_body(payload, ranges, bundle_id)
+                else:
+                    content_type = response.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").lower()
+                    if content_type.startswith("multipart/"):
+                        range_payloads = await self._parse_multipart_response(response, ranges, bundle_id)
                     else:
-                        content_type = response.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").lower()
-                        if content_type.startswith("multipart/"):
-                            range_payloads = await self._parse_multipart_response(response, ranges, bundle_id)
-                        else:
-                            payload = await response.read()
-                            if len(ranges) != 1:
-                                raise DownloadError(
-                                    f"多段range未返回multipart: bundle_id={bundle_id}, ranges={len(ranges)}"
-                                )
-                            range_payloads = [payload]
-
-                    if len(range_payloads) != len(ranges):
-                        raise DownloadError(
-                            f"range响应数量不匹配: bundle_id={bundle_id}, expected={len(ranges)}, "
-                            f"actual={len(range_payloads)}"
-                        )
-
-                    for chunk_range, payload in zip(ranges, range_payloads):
-                        expected_size = chunk_range.end - chunk_range.start + 1
-                        if len(payload) != expected_size:
+                        payload = await response.read()
+                        if len(ranges) != 1:
                             raise DownloadError(
-                                f"下载range失败: bundle_id={bundle_id}, range={chunk_range.start}-{chunk_range.end}, "
-                                f"actual={len(payload)}, expected={expected_size}"
+                                f"多段range未返回multipart: bundle_id={bundle_id}, ranges={len(ranges)}"
                             )
-                    return range_payloads
-            except (aiohttp.ClientError, asyncio.TimeoutError, DownloadError) as e:
-                if attempt == RETRY_LIMIT - 1:
-                    raise DownloadError(f"下载 bundle {bundle_id:016X} ranges 失败: {e}") from e
-                await asyncio.sleep(attempt + 1)
+                        range_payloads = [payload]
 
-        raise DownloadError(f"下载 bundle {bundle_id:016X} ranges 失败")
+                if len(range_payloads) != len(ranges):
+                    raise DownloadError(
+                        f"range响应数量不匹配: bundle_id={bundle_id}, expected={len(ranges)}, "
+                        f"actual={len(range_payloads)}"
+                    )
+
+                for chunk_range, payload in zip(ranges, range_payloads):
+                    expected_size = chunk_range.end - chunk_range.start + 1
+                    if len(payload) != expected_size:
+                        raise DownloadError(
+                            f"下载range失败: bundle_id={bundle_id}, range={chunk_range.start}-{chunk_range.end}, "
+                            f"actual={len(payload)}, expected={expected_size}"
+                        )
+                return range_payloads
+        except (aiohttp.ClientError, asyncio.TimeoutError, DownloadError) as e:
+            raise DownloadError(f"下载 bundle {bundle_id:016X} ranges 失败: {e}") from e
 
     async def _process_bundle_job(
         self,
@@ -590,6 +747,18 @@ class PatcherManifest:
                         f"解压chunk失败: chunk_id={chunk.chunk_id}, bundle_id={chunk.bundle.bundle_id}"
                     ) from e
 
+                verified_hash_keys = set()
+                for verify_target in task.targets:
+                    verify_key = (verify_target.chunk_id, verify_target.hash_type)
+                    if verify_key in verified_hash_keys:
+                        continue
+                    self._validate_chunk_hash(
+                        chunk_data=data,
+                        chunk_id=verify_target.chunk_id,
+                        hash_type=verify_target.hash_type,
+                    )
+                    verified_hash_keys.add(verify_key)
+
                 for target in task.targets:
                     if len(data) != target.expected_len:
                         raise DecompressError(
@@ -606,16 +775,18 @@ class PatcherManifest:
         file_pool: FileHandlePool,
     ):
         last_error: Optional[Exception] = None
-        for attempt in range(RETRY_LIMIT):
+        for attempt in range(self.max_retries):
             try:
                 await self._process_bundle_job(session=session, job=job, file_pool=file_pool)
                 return
             except (DownloadError, DecompressError, OSError) as e:
                 last_error = e
-                if attempt == RETRY_LIMIT - 1:
+                if attempt == self.max_retries - 1:
                     break
                 await asyncio.sleep(attempt + 1)
-        raise DownloadError(f"bundle任务失败: bundle_id={job.bundle_id}, error={last_error}")
+        raise DownloadError(
+            f"bundle任务失败: bundle_id={job.bundle_id}, retries={self.max_retries}, error={last_error}"
+        )
 
     def filter_files(
         self, pattern: Optional[str] = None, flag: Union[str, List[str], None] = None
@@ -662,19 +833,47 @@ class PatcherManifest:
 
         return filter(file_match, self.files.values())
 
-    async def download_files_concurrently(self, files: List[PatcherFile], concurrency_limit: int = 10) -> Tuple[bool]:
-        """
-        全局并发下载多个文件。
+    async def download_files_concurrently(
+        self,
+        files: List[PatcherFile],
+        concurrency_limit: Optional[int] = None,
+        raise_on_error: bool = True,
+    ) -> Tuple[bool, ...]:
+        """全局并发下载多个文件。
 
         关键策略：
-        1. 先按 ChunkID 全局去重，再按 Bundle 分组。
-        2. 对同一 Bundle 的 chunk 进行范围合并，减少小 Range 请求数量。
-        3. 下载后按写入目标扇出到多个文件，避免重复下载/重复解压。
+        1. 按 ChunkID 全局去重，再按 Bundle 分组。
+        2. 同一 Bundle 执行 range 合并，减少请求数量。
+        3. 下载后按写入目标扇出到多个文件，避免重复下载与重复解压。
 
-        :param files: 需要下载的文件列表。
-        :param concurrency_limit: Bundle 任务并发数。
-        :return: 每个文件下载后的状态（顺序与入参一致）。
+        Args:
+            files: 需要下载的文件列表。
+            concurrency_limit: 覆盖默认并发；为 None 时使用实例配置。
+            raise_on_error: 为 True 时只要存在失败 bundle 即抛出 DownloadBatchError。
+
+        Returns:
+            与输入顺序一致的结果元组，每个元素表示对应文件是否成功。
+
+        Raises:
+            DownloadBatchError: 存在失败 bundle 且 raise_on_error=True 时抛出。
         """
+        def build_results(target_files: List[PatcherFile], failed_bundle_ids: Optional[set[int]] = None) -> Tuple[bool, ...]:
+            failed_bundle_ids = failed_bundle_ids or set()
+            results: List[bool] = []
+            for target_file in target_files:
+                if target_file.link:
+                    results.append(True)
+                    continue
+                output = self._file_output(target_file)
+                if not self._is_complete_file(target_file, output):
+                    results.append(False)
+                    continue
+                has_failed_chunk = any(
+                    chunk.bundle.bundle_id in failed_bundle_ids for chunk in target_file.chunks
+                )
+                results.append(not has_failed_chunk)
+            return tuple(results)
+
         if not files:
             return tuple()
 
@@ -697,13 +896,14 @@ class PatcherManifest:
 
         # 全部已完成或均为link文件
         if not pending_files:
-            return tuple(self._is_complete_file(file, self._file_output(file)) or bool(file.link) for file in files)
+            return build_results(files)
 
         jobs = self._build_bundle_jobs(pending_files)
         if not jobs:
-            return tuple(self._is_complete_file(file, self._file_output(file)) or bool(file.link) for file in files)
+            return build_results(files)
 
-        worker_count = max(1, min(concurrency_limit or self.concurrency_limit, len(jobs)))
+        effective_concurrency = concurrency_limit if concurrency_limit is not None else self.concurrency_limit
+        worker_count = max(1, min(effective_concurrency, len(jobs)))
         connector = aiohttp.TCPConnector(
             limit=max(worker_count * 4, 16),
             limit_per_host=max(worker_count * 4, 16),
@@ -715,7 +915,7 @@ class PatcherManifest:
         for job in jobs:
             queue.put_nowait(job)
 
-        errors: List[Tuple[int, Exception]] = []
+        errors: List[BundleJobFailure] = []
         error_lock = asyncio.Lock()
 
         async def worker():
@@ -729,12 +929,12 @@ class PatcherManifest:
                     await self._run_bundle_job_with_retry(session=session, job=job, file_pool=file_pool)
                 except Exception as exc:
                     async with error_lock:
-                        errors.append((job.bundle_id, exc))
+                        errors.append(BundleJobFailure(bundle_id=job.bundle_id, error=exc))
                 finally:
                     queue.task_done()
 
         try:
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout, auto_decompress=False) as session:
                 workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
                 await queue.join()
                 await asyncio.gather(*workers)
@@ -742,10 +942,13 @@ class PatcherManifest:
             await asyncio.to_thread(file_pool.close)
 
         if errors:
-            for bundle_id, exc in errors:
-                logger.error(f"bundle下载失败: {bundle_id:016X}, error={exc}")
+            if raise_on_error:
+                raise DownloadBatchError(errors)
+            for failure in errors:
+                logger.error(f"bundle下载失败: {failure.bundle_id:016X}, error={failure.error}")
+            return build_results(files, failed_bundle_ids={failure.bundle_id for failure in errors})
 
-        return tuple(self._is_complete_file(file, self._file_output(file)) or bool(file.link) for file in files)
+        return build_results(files)
 
     def parse_rman(self, f: BinaryIO):
         parser = BinaryParser(f)
@@ -787,10 +990,14 @@ class PatcherManifest:
         file_entries = list(self._parse_table(parser, self._parse_file_entry))
         parser.seek(offsets[3])
         directories = {did: (name, parent) for name, did, parent in self._parse_table(parser, self._parse_directory)}
+        parameter_hash_types: List[int] = []
+        if len(offsets) > 5 and offsets[5] > 0:
+            parser.seek(offsets[5])
+            parameter_hash_types = list(self._parse_table(parser, self._parse_parameter))
 
         # merge files and directory data
         self.files = {}
-        for name, link, flag_ids, dir_id, filesize, chunk_ids in file_entries:
+        for name, link, flag_ids, dir_id, filesize, chunk_ids, param_index in file_entries:
             while dir_id is not None:
                 dir_name, dir_id = directories[dir_id]
                 name = f"{dir_name}/{name}"
@@ -799,7 +1006,19 @@ class PatcherManifest:
             else:
                 flags = None
             file_chunks = [self.chunks[chunk_id] for chunk_id in chunk_ids]
-            self.files[name] = PatcherFile(name, filesize, link, flags, file_chunks, self)
+            hash_type = 0
+            if param_index is not None and 0 <= param_index < len(parameter_hash_types):
+                hash_type = parameter_hash_types[param_index]
+            chunk_hash_types = {chunk_id: hash_type for chunk_id in chunk_ids}
+            self.files[name] = PatcherFile(
+                name,
+                filesize,
+                link,
+                flags,
+                file_chunks,
+                self,
+                chunk_hash_types=chunk_hash_types,
+            )
 
         # note: last two tables are unresolved
 
@@ -848,7 +1067,7 @@ class PatcherManifest:
     @classmethod
     def _parse_file_entry(cls, parser):
         """Parse a file entry
-        (name, link, flag_ids, directory_id, filesize, chunk_ids)
+        (name, link, flag_ids, directory_id, filesize, chunk_ids, param_index)
         """
         fields = cls._parse_field_table(parser, (
             ('file_id', '<Q'),
@@ -862,7 +1081,7 @@ class PatcherManifest:
             None,
             ('link', 'str'),
             None,
-            None,
+            ('param_index', '<B'),
             None,
         ))
 
@@ -876,7 +1095,26 @@ class PatcherManifest:
         chunk_count, = parser.unpack('<L')  # _ == 0
         chunk_ids = list(parser.unpack(f'<{chunk_count}Q'))
 
-        return fields['name'], fields['link'], flag_ids, fields['directory_id'], fields['file_size'], chunk_ids
+        return (
+            fields['name'],
+            fields['link'],
+            flag_ids,
+            fields['directory_id'],
+            fields['file_size'],
+            chunk_ids,
+            fields['param_index'] or 0,
+        )
+
+    @classmethod
+    def _parse_parameter(cls, parser):
+        fields = cls._parse_field_table(parser, (
+            None,
+            ('hash_type', '<B'),
+            ('min_chunk_size', '<L'),
+            ('max_chunk_size', '<L'),
+            ('max_uncompressed_size', '<L'),
+        ))
+        return fields['hash_type'] or 0
 
     @classmethod
     def _parse_directory(cls, parser):
