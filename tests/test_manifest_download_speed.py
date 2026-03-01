@@ -147,8 +147,12 @@ def test_game_manifest_overall_download_speed():
             concurrency_limit=concurrency,
         )
 
+        # 优先使用 README 推荐的语言+后缀过滤方式进行样本挑选
+        filtered = list(manifest.filter_files(flag="zh_CN", pattern="wad.client"))
+        candidate_files = filtered if filtered else list(manifest.files.values())
+
         selected, planned_bytes = _pick_files(
-            list(manifest.files.values()),
+            candidate_files,
             suffix=suffix,
             target_bytes=target_bytes,
             max_files=max_files,
@@ -196,7 +200,7 @@ def test_game_manifest_overall_download_speed():
                 f"[PERF] manifest={manifest_url}\n"
                 f"[PERF] files={len(selected)} planned={planned_mb:.2f}MB downloaded={downloaded_mb:.2f}MB "
                 f"elapsed={elapsed:.3f}s throughput={mbps:.2f}MB/s concurrency={concurrency} "
-                f"pick_mode={pick_mode}\n"
+                f"pick_mode={pick_mode} candidates={len(candidate_files)} filtered_zh_cn={len(filtered)}\n"
                 f"[PERF] jobs={len(jobs)} unique_bundles={unique_bundles} ranges={total_ranges} "
                 f"unique_chunks={unique_chunks}"
             )

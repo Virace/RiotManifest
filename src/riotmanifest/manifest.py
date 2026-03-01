@@ -419,7 +419,7 @@ class PatcherManifest:
         file: Optional[StrPath],
         path: StrPath,
         bundle_url: str = "https://lol.dyn.riotcdn.net/channels/public/bundles/",
-        concurrency_limit: int = 50,
+        concurrency_limit: int = 16,
         max_retries: int = RETRY_LIMIT,
     ):
         """初始化 manifest 对象并完成解析。
