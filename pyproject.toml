@@ -1,20 +1,21 @@
 [project]
 name = "riotmanifest"
-version = "1.1.0"
+version = "1.1.9"
 description = "Add your description here"
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
 ]
 dependencies = [
-    "loguru>=0.7.2",
-    "pyzstd>=0.16.1",
-    "requests>=2.32.3",
-    "aiohttp>=3.10.5",
-    "league-tools>=0.2.3",
+    "loguru>=0.7.3",
+    "pyzstd>=0.19.1",
+    "aiohttp>=3.13.3",
+    "urllib3>=2.5.0",
+    "blake3>=1.0.8",
+    "league-tools>=1.1.1",
 ]
 readme = "README.md"
 license = "GPL-3.0"
-requires-python = ">= 3.8"
+requires-python = ">= 3.10"
 homepage = "https://github.com/Virace/RiotManifest"
 repository = "https://github.com/Virace/RiotManifest"
 
@@ -22,12 +23,21 @@ repository = "https://github.com/Virace/RiotManifest"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.rye]
+[tool.uv]
 managed = true
-dev-dependencies = []
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/riotmanifest"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: 真实网络集成测试（含压力测试）",
+]

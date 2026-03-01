@@ -1,5 +1,5 @@
 # RiotManifest
-![](https://img.shields.io/badge/python-%3E%3D3.8-blue)
+![](https://img.shields.io/badge/python-%3E%3D3.10-blue)
 
 riot提供的manifest文件进行解析下载
 
@@ -12,13 +12,17 @@ riot提供的manifest文件进行解析下载
 
 
 ### 介绍
-目前的功能是可以传入URL或本地文件目录，解析manifest文件，下载文件。
+目前支持传入 URL 或本地文件路径，解析 manifest 并下载文件。
 
 大部分代码都来自于[CommunityDragon/CDTB](https://github.com/CommunityDragon/CDTB)项目，感谢他们的工作。
 
-对`PatcherManifest`进行修改使其支持URL manifest文件下载，细化`filter_files`方法，使其支持正则表达式过滤文件。
+当前下载链路默认走全局并发下载（推荐），并支持：
+- 按 `ChunkID` 全局去重，避免重复下载与重复解压
+- 按 Bundle 聚合与 multi-range 请求，减少 HTTP 往返
+- 文件句柄池按偏移写入，降低 open/close 开销
+- chunk 解压后哈希校验（`param_index -> hash_type`）
 
-对`PatcherFile`增加`download_file`方法，使其支持文件下载。并且使用`aiohttp`进行异步下载。默认并发数为50，并发数可以通过实例化`PatcherManifest`时 `concurrency_limit`参数进行设置； 也可以调用`PatcherFile`的`download_file`方法时传入`concurrency_limit`参数进行设置。
+默认并发数为 `16`，可通过 `PatcherManifest(..., concurrency_limit=...)` 调整，也可在调用 `download_files_concurrently` 时临时覆盖。
 
 ### 安装
 ```shell
@@ -26,21 +30,24 @@ pip3 install riotmanifest
 ```
 
 ### 使用
-- **异步多并发下载(不推荐)**
+- **异步并发下载（推荐，默认并发 16）**
 ```python
 import asyncio
 from riotmanifest import PatcherManifest
+
+
 async def main():
     bundle_url = 'https://lol.dyn.riotcdn.net/channels/public/bundles/'
     manifest = PatcherManifest(
       r"https://lol.secure.dyn.riotcdn.net/channels/public/releases/CB3A1B2A17ED9AAB.manifest",
       path=r'E:\out',
       bundle_url=bundle_url)
-    
-    
+
+    # 推荐：先按语言与文件名过滤后再下载
     files = list(manifest.filter_files(flag='zh_CN', pattern='wad.client'))
 
-    await manifest.download_files_concurrently(files, 5)
+    # 不传 concurrency_limit 时，使用 manifest 默认并发（16）
+    await manifest.download_files_concurrently(files)
 
 
 
@@ -48,25 +55,25 @@ if __name__ == '__main__':
     asyncio.run(main())
 ```
 
-注意，单个文件的下载并发是50，`download_files_concurrently`方法是对多个文件进行并发下载。建议这个数不要超过10，否则有封IP的风险(实测PatcherManifest传入100，download_files_concurrently传入10，后台可查最大线程为800+，正常执行，量力而行)。
-![](https://s2.loli.net/2024/03/16/PUzxQq4sgmp5h2c.png)
+- 如果你的网络/磁盘较弱，可把并发改到 `8~12`；
+- 如果机器配置较好且网络稳定，可尝试 `16~24` 并发。
 
+### 性能基线（2026-03-02）
+以下结果来自仓库内测试 `tests/test_manifest_download_speed.py`（真实网络集成测试）：
 
-- **ManifestDownloader外壳**
-```python
-
-from riotmanifest.external_manifest import ResourceDL
-
-rdl = ResourceDL(r'E:\out')
-rdl.d_game = True
-rdl.download_resources('content-metadata.json')
+```bash
+RIOT_PERF_RUN=1 ./scripts/_uv.sh run pytest -q -s tests/test_manifest_download_speed.py
 ```
 
-直接调用开源程序[Morilli/ManifestDownloader](https://github.com/Morilli/ManifestDownloader)直接下载，具体查看函数文档
+本次结果（EUW1，默认并发 16，优先筛选 `filter_files(flag='zh_CN', pattern='wad.client')`）：
+- manifest：`https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest`
+- 样本：`files=92`，`planned=515.14MB`
+- 吞吐：`63.61MB/s`（`elapsed=8.098s`）
+- 调度：`jobs=126`，`ranges=142`，`unique_chunks=1410`
 
-自动从GitHub下载可执行文件，保存至temp目录，默认使用代理
- 
- 
+与 README 早期历史信息对比：
+- 历史（2024）：文档标注“多并发下载不推荐，建议不超过 10”。
+- 当前（2026）：默认并发已调整为 `16`，并发下载作为推荐路径，实测吞吐可稳定在几十 MB/s 量级（受网络波动影响）。
 
 
 - WADExtractor
@@ -103,7 +110,6 @@ print(len(data))
 
 ### 感谢
 - [@CommunityDragon](https://github.com/CommunityDragon/CDTB), **CDTB**
-- [@Morilli](https://github.com/Morilli/ManifestDownloader), **ManifestDownloader**
 
 - 以及**JetBrains**提供开发环境支持
   
