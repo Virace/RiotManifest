@@ -8,8 +8,8 @@ authors = [
 dependencies = [
     "loguru>=0.7.3",
     "pyzstd>=0.19.1",
-    "requests>=2.32.5",
     "aiohttp>=3.13.3",
+    "urllib3>=2.5.0",
     "league-tools>=1.1.1",
 ]
 readme = "README.md"

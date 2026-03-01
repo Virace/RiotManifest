@@ -9,10 +9,10 @@
 
 from typing import Dict, List, Optional, Union
 
-import requests
 from loguru import logger
 
 from riotmanifest.extractor import WADExtractor
+from riotmanifest.http_client import http_get_json
 
 
 class RiotGameData:
@@ -34,9 +34,7 @@ class RiotGameData:
     def load_lcu_data(self) -> None:
         """加载并解析 LCU 数据。"""
         logger.debug("正在加载 LCU 数据...")
-        response = requests.get(self.LCU_URL)
-        response.raise_for_status()  # 确保请求成功
-        lcu_data = response.json()
+        lcu_data = http_get_json(self.LCU_URL)
 
         for name, patchline in lcu_data.items():
             for config_json in patchline["platforms"]["win"]["configurations"]:
@@ -54,9 +52,7 @@ class RiotGameData:
         logger.debug(f"正在加载 GAME 数据，区域: {regions}...")
         for region in regions:
             url = self.GAME_URL_TEMPLATE.format(region=region)
-            response = requests.get(url)
-            response.raise_for_status()  # 确保请求成功
-            game_data = response.json()
+            game_data = http_get_json(url)
 
             self._game_data[region] = [
                 {
@@ -90,4 +86,3 @@ class RiotGameData:
     def available_game_regions(self) -> List[str]:
         """返回当前可用的 GAME 区域列表。"""
         return list(self._game_data.keys())
-

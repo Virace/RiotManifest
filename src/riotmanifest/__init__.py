@@ -11,6 +11,7 @@ from loguru import logger
 
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import RiotGameData
+from riotmanifest.http_client import HttpClientError
 from riotmanifest.manifest import (
     BinaryParser,
     DecompressError,
@@ -33,4 +34,5 @@ __all__ = [
     "PatcherManifest",
     "WADExtractor",
     "RiotGameData",
+    "HttpClientError",
 ]

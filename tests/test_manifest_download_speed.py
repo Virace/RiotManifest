@@ -5,9 +5,9 @@ import time
 from typing import List, Tuple
 
 import pytest
-import requests
 
 from riotmanifest.game import RiotGameData
+from riotmanifest.http_client import HttpClientError
 from riotmanifest.manifest import PatcherFile, PatcherManifest
 
 
@@ -86,7 +86,7 @@ def _load_latest_game_with_retry(region: str, retries: int, retry_delay_sec: flo
             if latest:
                 return latest
             last_error = RuntimeError(f"未获取到区域 {region} 的最新 GAME 清单")
-        except requests.RequestException as exc:
+        except HttpClientError as exc:
             last_error = exc
 
         if attempt + 1 < retries:

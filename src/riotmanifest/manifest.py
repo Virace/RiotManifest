@@ -23,8 +23,8 @@ from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import pyzstd
-import requests
 from loguru import logger
+from riotmanifest.http_client import HttpClientError, http_get_bytes
 
 RETRY_LIMIT = 5
 
@@ -274,9 +274,7 @@ class PatcherFile:
         for attempt in range(RETRY_LIMIT):
             try:
                 headers = {"Range": f"bytes={chunk.offset}-{chunk.offset + chunk.size - 1}"}
-                response = requests.get(url, headers=headers)
-                response.raise_for_status()
-                content = response.content
+                content = http_get_bytes(url, headers=headers)
 
                 if len(content) != chunk.size:
                     raise DownloadError(
@@ -284,7 +282,7 @@ class PatcherFile:
                         f"bundle_id为 {chunk.bundle.bundle_id}"
                     )
                 break
-            except requests.RequestException as e:
+            except HttpClientError as e:
                 if attempt == RETRY_LIMIT - 1:
                     raise DownloadError(
                         f"在 {RETRY_LIMIT} 次尝试后，下载chunk {chunk.chunk_id}失败，bundle_id为 {chunk.bundle.bundle_id}"
@@ -347,8 +345,7 @@ class PatcherManifest:
 
         parsed_url = urlparse(file)
         if parsed_url.scheme and parsed_url.netloc:
-            res = requests.get(file)
-            self.parse_rman(io.BytesIO(res.content))
+            self.parse_rman(io.BytesIO(http_get_bytes(file)))
         elif os.path.isfile(file) and os.path.exists(file):
             with open(file, "rb") as f:
                 self.parse_rman(f)
