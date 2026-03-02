@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
+from typing import Any
 from urllib.parse import urljoin
 
 import pyzstd
@@ -23,9 +26,16 @@ from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
 
 
 class WADExtractor:
-    """按需提取 WAD 内部文件，避免整包下载。."""
+    """按需提取 WAD 内部小文件，避免整包下载.
+
+    该提取器适合“少量目标文件”场景，尤其是批量提取多个小文件。
+    当单个 WAD 目标文件过多时，整体请求与计算开销会明显升高，
+    更建议先下载完整 WAD 再本地提取。
+    """
 
     V3_HEADER_MINI_SIZE = 4 + 268 + 4
+    DEFAULT_PREFETCH_CHUNK_CONCURRENCY = 6
+    DEFAULT_RECOMMENDED_MAX_TARGETS_PER_WAD = 120
 
     def __init__(
         self,
@@ -34,6 +44,8 @@ class WADExtractor:
         cache_max_bytes: int = 128 * 1024 * 1024,
         cache_max_entries: int = 512,
         retry_limit: int = RETRY_LIMIT,
+        prefetch_chunk_concurrency: int = DEFAULT_PREFETCH_CHUNK_CONCURRENCY,
+        recommended_max_targets_per_wad: int = DEFAULT_RECOMMENDED_MAX_TARGETS_PER_WAD,
     ):
         """初始化 WAD 提取器。.
 
@@ -43,6 +55,9 @@ class WADExtractor:
             cache_max_bytes: chunk 解压缓存最大字节数，0 表示禁用缓存。
             cache_max_entries: chunk 解压缓存最大条目数，0 表示禁用缓存。
             retry_limit: 单个 chunk 下载重试次数。
+            prefetch_chunk_concurrency: 批量提取时的 chunk 预取并发数，<=1 时禁用预取。
+            recommended_max_targets_per_wad: 单个 WAD 建议提取的最大目标文件数。
+                超过该值会给出告警，并跳过并发预取。
 
         Raises:
             TypeError: 传入对象不是 PatcherManifest 时抛出。
@@ -53,6 +68,8 @@ class WADExtractor:
         self.manifest = manifest
         self.bundle_url = bundle_url
         self.retry_limit = max(1, retry_limit)
+        self.prefetch_chunk_concurrency = max(1, prefetch_chunk_concurrency)
+        self.recommended_max_targets_per_wad = max(1, recommended_max_targets_per_wad)
         self._cache = ChunkCache(
             max_bytes=cache_max_bytes,
             max_entries=cache_max_entries,
@@ -60,11 +77,14 @@ class WADExtractor:
 
         logger.debug(
             "WADExtractor 初始化完成: manifest={}, bundle_url={}, "
-            "cache_max_entries={}, cache_max_bytes={}",
+            "cache_max_entries={}, cache_max_bytes={}, prefetch_chunk_concurrency={}, "
+            "recommended_max_targets_per_wad={}",
             getattr(self.manifest, "file", None),
             self.bundle_url,
             self._cache.max_entries,
             self._cache.max_bytes,
+            self.prefetch_chunk_concurrency,
+            self.recommended_max_targets_per_wad,
         )
 
     def __enter__(self) -> WADExtractor:
@@ -203,6 +223,80 @@ class WADExtractor:
             return hash_func(inner_path)
         return WAD.get_hash(inner_path)
 
+    @staticmethod
+    def _section_id(section: Any) -> tuple[int, int]:
+        """构建 section 的稳定标识，用于去重。."""
+        return int(section.offset), int(section.compressed_size)
+
+    def _collect_unique_chunks_for_sections(self, wad_file: PatcherFile, sections: Iterable[Any]) -> list[PatcherChunk]:
+        """根据 section 列表计算并去重所需 chunk 集合。."""
+        chunk_index: dict[int, PatcherChunk] = {}
+        visited_sections: set[tuple[int, int]] = set()
+        for section in sections:
+            section_id = self._section_id(section)
+            if section_id in visited_sections:
+                continue
+            visited_sections.add(section_id)
+
+            section_chunks, _ = self._collect_chunks_for_range(
+                wad_file,
+                start=section.offset,
+                length=section.compressed_size,
+            )
+            for chunk in section_chunks:
+                chunk_index.setdefault(chunk.chunk_id, chunk)
+        return list(chunk_index.values())
+
+    def _prefetch_chunks(self, wad_file: PatcherFile, chunks: list[PatcherChunk]) -> None:
+        """并发预取并解压 chunk，填充缓存以加速后续提取。."""
+        if not chunks:
+            return
+
+        worker_count = min(self.prefetch_chunk_concurrency, len(chunks))
+        if worker_count <= 1:
+            for chunk in chunks:
+                self._download_chunk_bytes(wad_file, chunk)
+            return
+
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="wad-prefetch") as executor:
+            future_to_chunk = {
+                executor.submit(self._download_chunk_bytes, wad_file, chunk): chunk for chunk in chunks
+            }
+            for future in as_completed(future_to_chunk):
+                chunk = future_to_chunk[future]
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "chunk 预取失败，后续将按需重试: chunk_id={:016X}, bundle_id={:016X}, error={}",
+                        chunk.chunk_id,
+                        chunk.bundle.bundle_id,
+                        exc,
+                    )
+
+    def _prepare_prefetch(self, wad_file: PatcherFile, sections: list[Any]) -> None:
+        """在批量小文件提取前预热 chunk 缓存。."""
+        if len(sections) <= 1:
+            return
+
+        if len(sections) > self.recommended_max_targets_per_wad:
+            logger.warning(
+                "单个 WAD 目标文件过多({})，当前按需提取方式不建议用于大批量文件；"
+                "建议先下载完整 WAD 再本地提取。此次将跳过并发预取。",
+                len(sections),
+            )
+            return
+
+        needed_chunks = self._collect_unique_chunks_for_sections(wad_file, sections)
+        logger.debug(
+            "开始预取 WAD chunk: wad_file={}, targets={}, unique_chunks={}, concurrency={}",
+            wad_file.name,
+            len(sections),
+            len(needed_chunks),
+            self.prefetch_chunk_concurrency,
+        )
+        self._prefetch_chunks(wad_file, needed_chunks)
+
     def _find_wad_file(self, wad_filename: str) -> PatcherFile | None:
         target = wad_filename.lower()
         for file in self.manifest.files.values():
@@ -253,6 +347,7 @@ class WADExtractor:
                 continue
 
             section_map = {section.path_hash: section for section in wad_header.files}
+            resolved_targets: list[tuple[str, Any]] = []
 
             for target_path in target_paths:
                 path_hash = self._resolve_path_hash(wad_header, target_path)
@@ -261,7 +356,17 @@ class WADExtractor:
                     logger.warning("WAD 内未找到路径: {} -> {}", wad_filename, target_path)
                     results[wad_filename][target_path] = None
                     continue
+                resolved_targets.append((target_path, section))
 
+            try:
+                self._prepare_prefetch(
+                    wad_file=wad_file,
+                    sections=[section for _, section in resolved_targets],
+                )
+            except (DownloadError, DecompressError, ValueError) as exc:
+                logger.warning("WAD 预取阶段失败，回退到按需提取: {}, error={}", wad_filename, exc)
+
+            for target_path, section in resolved_targets:
                 try:
                     compressed_data = self._read_wad_file_range(
                         wad_file=wad_file,
@@ -294,7 +399,12 @@ class WADExtractor:
         return results
 
     def extract_files(self, wad_file_paths: dict[str, list[str]]) -> dict[str, dict[str, bytes | None]]:
-        """提取多个 WAD 内部文件并返回 bytes。."""
+        """提取多个 WAD 内部文件并返回 bytes.
+
+        注意：
+            该接口面向“少量小文件”的按需提取场景。
+            若单个 WAD 的目标文件数量过多，建议改为先下载完整 WAD 后本地提取。
+        """
         raw_results = self._extract_files_impl(wad_file_paths=wad_file_paths, output_dir=None)
         return raw_results  # type: ignore[return-value]
 
@@ -303,7 +413,12 @@ class WADExtractor:
         wad_file_paths: dict[str, list[str]],
         output_dir: str,
     ) -> dict[str, dict[str, str | None]]:
-        """提取多个 WAD 内部文件并写入磁盘。."""
+        """提取多个 WAD 内部文件并写入磁盘.
+
+        注意：
+            该接口面向“少量小文件”的按需提取场景。
+            若单个 WAD 的目标文件数量过多，建议改为先下载完整 WAD 后本地提取。
+        """
         disk_results = self._extract_files_impl(wad_file_paths=wad_file_paths, output_dir=Path(output_dir))
         return disk_results  # type: ignore[return-value]
 

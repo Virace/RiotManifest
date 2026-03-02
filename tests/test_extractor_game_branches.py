@@ -88,6 +88,66 @@ def test_cache_put_disabled_too_large_and_replace():
     assert replaced.cache_stats() == {"entries": 1, "bytes": 1}
 
 
+def test_prepare_prefetch_deduplicates_chunk_list(monkeypatch):
+    manifest = _make_manifest_stub()
+    wad_file = _make_wad_file(
+        manifest,
+        chunk_specs=[(0x1, 3, 3), (0x2, 3, 3)],
+        file_size=6,
+    )
+    extractor = WADExtractor(
+        manifest,
+        prefetch_chunk_concurrency=4,
+        recommended_max_targets_per_wad=10,
+    )
+
+    sections = [
+        types.SimpleNamespace(offset=0, compressed_size=3),
+        types.SimpleNamespace(offset=3, compressed_size=3),
+        types.SimpleNamespace(offset=1, compressed_size=1),
+    ]
+
+    captured_chunk_ids: list[int] = []
+
+    def _fake_prefetch(self, file, chunks):  # pylint: disable=unused-argument
+        captured_chunk_ids.extend(chunk.chunk_id for chunk in chunks)
+
+    monkeypatch.setattr(WADExtractor, "_prefetch_chunks", _fake_prefetch)
+    extractor._prepare_prefetch(wad_file, sections)
+
+    assert set(captured_chunk_ids) == {0x1, 0x2}
+    assert len(captured_chunk_ids) == 2
+
+
+def test_prepare_prefetch_skips_when_targets_too_many(monkeypatch):
+    manifest = _make_manifest_stub()
+    wad_file = _make_wad_file(
+        manifest,
+        chunk_specs=[(0x1, 3, 3), (0x2, 3, 3)],
+        file_size=6,
+    )
+    extractor = WADExtractor(
+        manifest,
+        prefetch_chunk_concurrency=4,
+        recommended_max_targets_per_wad=1,
+    )
+
+    sections = [
+        types.SimpleNamespace(offset=0, compressed_size=3),
+        types.SimpleNamespace(offset=3, compressed_size=3),
+    ]
+
+    state = {"called": False}
+
+    def _fake_prefetch(self, file, chunks):  # pylint: disable=unused-argument
+        state["called"] = True
+
+    monkeypatch.setattr(WADExtractor, "_prefetch_chunks", _fake_prefetch)
+    extractor._prepare_prefetch(wad_file, sections)
+
+    assert not state["called"]
+
+
 def test_download_chunk_bytes_zero_size_returns_empty(monkeypatch):
     manifest = _make_manifest_stub()
     wad_file = _make_wad_file(

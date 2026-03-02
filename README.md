@@ -145,6 +145,22 @@ print(len(data))
 ```
 该方法无需下载完整WAD文件，直接从manifest中计算需要解包的文件位置，直接获取，减少网络请求。
 
+注意事项：
+- 该方式适合“少量小文件按需提取”。
+- 当单个 WAD 需要提取的目标文件很多时，不建议继续使用按需提取（请求和偏移计算成本会明显上升）。
+- 当前提取器已内置小文件批量优化（chunk 受限并发预取），但超出建议数量时会自动跳过预取并告警。
+- 大批量提取建议改为：先下载完整 WAD，再本地解包处理。
+
+可按需调整预取参数：
+
+```python
+we = WADExtractor(
+    manifest,
+    prefetch_chunk_concurrency=6,          # 批量提取时的 chunk 预取并发
+    recommended_max_targets_per_wad=120,   # 单个 WAD 的建议目标文件上限
+)
+```
+
 可选：直接写入磁盘，避免在调用方持有大量 `bytes`：
 
 ```python
