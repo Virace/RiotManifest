@@ -8,13 +8,29 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from loguru import logger
 
-from riotmanifest import PatcherManifest, RiotGameData, WADExtractor
+from riotmanifest import PatcherManifest, RiotGameData, WADExtractor, diff_manifests, diff_wad_headers
 
 MANIFEST_URL = "https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest"
 DEFAULT_WAD = "DATA/FINAL/Champions/Annie.wad.client"
+# 16.3.7457600
+OLD_MANIFEST_URL = "https://lol.secure.dyn.riotcdn.net/channels/public/releases/65F094ADF9A65AD2.manifest"
+
+# 16.4.7480682
+NEW_MANIFEST_URL = "https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest"
+FOCUS_TARGET_FILES = [
+    "DATA/FINAL/Champions/Renata.zh_CN.wad.client",
+]
+DIFF_OUTPUT_JSON = Path("out") / "manifest_diff_renata_16_3_to_16_4.json"
+DIFF_COLLAPSE_EQUAL_PAIRS = True
+
+MANIFEST_16_3_URL = "https://lol.secure.dyn.riotcdn.net/channels/public/releases/9FE07DA11C89FD5E.manifest"
+MANIFEST_16_4_URL = "https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest"
+AKSHAN_WAD_PATH = "DATA/FINAL/Champions/Akshan.zh_CN.wad.client"
+AKSHAN_WAD_DIFF_OUTPUT_JSON = Path("out") / "wad_header_diff_akshan_16_3_to_16_4.json"
 
 
 logger.configure(handlers=[{"sink": sys.stdout, "level": "DEBUG"}])
@@ -79,10 +95,74 @@ def test_game_data() -> None:
     print(rgd.available_game_regions())
 
 
+def test_diff(output_json: Path = DIFF_OUTPUT_JSON) -> None:
+    """手动验证 Manifest 差异并导出美化 JSON。."""
+    rep = diff_manifests(
+        OLD_MANIFEST_URL,
+        NEW_MANIFEST_URL,
+        flags="zh_CN",
+        include_unchanged=False,
+        hash_type_mismatch_mode="loose",
+    )
+    saved_path = rep.dump_pretty_json(
+        output_json,
+        collapse_equal_pairs=DIFF_COLLAPSE_EQUAL_PAIRS,
+    )
+    print("diff summary:", rep.summary)
+    print("changed files:", [entry.path for entry in rep.changed])
+    print("unchanged files:", [entry.path for entry in rep.unchanged])
+    print("json saved:", saved_path)
+
+
+def test_akshan_wad_header_diff(output_json: Path = AKSHAN_WAD_DIFF_OUTPUT_JSON) -> None:
+    """手动验证 Akshan WAD 头差异并导出美化 JSON。."""
+    manifest_report = diff_manifests(
+        MANIFEST_16_3_URL,
+        MANIFEST_16_4_URL,
+        flags="zh_CN",
+        target_files=[AKSHAN_WAD_PATH],
+        include_unchanged=True,
+        detect_moves=False,
+        hash_type_mismatch_mode="loose",
+    )
+    report = diff_wad_headers(
+        manifest_report=manifest_report,
+        target_wad_files=[AKSHAN_WAD_PATH],
+        hash_type_mismatch_mode="loose",
+        include_unchanged=False,
+    )
+    saved_path = report.dump_pretty_json(
+        output_json,
+        collapse_manifest_equal_pairs=DIFF_COLLAPSE_EQUAL_PAIRS,
+    )
+
+    print("wad header diff summary:", report.summary)
+    if report.files:
+        entry = report.files[0]
+        changed_count = sum(1 for diff in entry.section_diffs if diff.status == "changed")
+        added_count = sum(1 for diff in entry.section_diffs if diff.status == "added")
+        removed_count = sum(1 for diff in entry.section_diffs if diff.status == "removed")
+        unchanged_count = sum(1 for diff in entry.section_diffs if diff.status == "unchanged")
+        print("target wad:", entry.wad_path)
+        print("wad status:", entry.status)
+        print(
+            "section stats:",
+            {
+                "changed": changed_count,
+                "added": added_count,
+                "removed": removed_count,
+                "unchanged": unchanged_count,
+            },
+        )
+    print("json saved:", saved_path)
+
+
 def main() -> None:
     """脚本主入口。."""
-    extra_test()
-    test_game_data()
+    # extra_test()
+    # test_game_data()
+    # test_diff()
+    test_akshan_wad_header_diff()
 
 
 if __name__ == "__main__":
