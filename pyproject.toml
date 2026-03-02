@@ -1,6 +1,6 @@
 [project]
 name = "riotmanifest"
-version = "1.1.9"
+version = "2.0.0"
 description = "Add your description here"
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
@@ -15,6 +15,7 @@ dependencies = [
 ]
 readme = "README.md"
 license = "GPL-3.0"
+license-files = ["LICENSE"]
 requires-python = ">= 3.10"
 homepage = "https://github.com/Virace/RiotManifest"
 repository = "https://github.com/Virace/RiotManifest"
@@ -29,15 +30,38 @@ managed = true
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.hatch.build]
+ignore-vcs = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/riotmanifest"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
+exclude = [".gitignore"]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "ruff>=0.15.4",
 ]
 
 [tool.pytest.ini_options]
 markers = [
     "integration: 真实网络集成测试（含压力测试）",
 ]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "D"]
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D100", "D101", "D102", "D103"]

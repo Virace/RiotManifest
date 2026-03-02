@@ -2,13 +2,12 @@ import asyncio
 import os
 import tempfile
 import time
-from typing import List, Tuple
 
 import pytest
 
 from riotmanifest.game import RiotGameData
-from riotmanifest.http_client import HttpClientError
 from riotmanifest.manifest import PatcherFile, PatcherManifest
+from riotmanifest.utils.http_client import HttpClientError
 
 
 def _env_int(name: str, default: int) -> int:
@@ -26,14 +25,14 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _pick_files(
-    files: List[PatcherFile],
+    files: list[PatcherFile],
     suffix: str,
     target_bytes: int,
     max_files: int,
     min_file_bytes: int,
     max_file_bytes: int,
     prefer_many_files: bool,
-) -> Tuple[List[PatcherFile], int]:
+) -> tuple[list[PatcherFile], int]:
     suffix = suffix.lower()
 
     # 优先压测 .wad.client 文件
@@ -49,7 +48,7 @@ def _pick_files(
     # 否则优先大文件以更快达到目标流量。
     candidates.sort(key=lambda f: f.size, reverse=not prefer_many_files)
 
-    selected: List[PatcherFile] = []
+    selected: list[PatcherFile] = []
     total = 0
     for file in candidates:
         if len(selected) >= max_files:
@@ -97,8 +96,7 @@ def _load_latest_game_with_retry(region: str, retries: int, retry_delay_sec: flo
 
 @pytest.mark.integration
 def test_game_manifest_overall_download_speed():
-    """
-    真实清单压力测速（网络集成测试，pytest 版本）。
+    """真实清单压力测速（网络集成测试，pytest 版本）.
 
     运行开关：
       RIOT_PERF_RUN=1
@@ -189,10 +187,12 @@ def test_game_manifest_overall_download_speed():
         planned_mb = planned_bytes / (1024 * 1024)
         mbps = downloaded_mb / max(elapsed, 1e-9)
 
-        jobs = manifest._build_bundle_jobs(selected)
+        jobs = manifest.downloader.build_bundle_jobs(selected)
         unique_bundles = len({job.bundle_id for job in jobs})
         total_ranges = sum(len(job.ranges) for job in jobs)
-        unique_chunks = sum(len(tasks) for tasks in manifest._build_global_task_map(selected).values())
+        unique_chunks = sum(
+            len(tasks) for tasks in manifest.downloader.build_global_task_map(selected).values()
+        )
 
         print(
                 "\n[PERF] "

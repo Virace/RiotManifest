@@ -1,4 +1,4 @@
-"""manifest 下载管线核心离线单测。"""
+"""manifest 下载管线核心离线单测."""
 
 import asyncio
 import hashlib
@@ -9,20 +9,23 @@ from pathlib import Path
 import pytest
 import pyzstd
 
-from riotmanifest.manifest import (
+from riotmanifest.core.chunk_hash import HASH_TYPE_HKDF, HASH_TYPE_SHA256, compute_chunk_hash
+from riotmanifest.core.errors import DownloadBatchError
+from riotmanifest.downloader import (
     BundleJob,
     ChunkRange,
-    DecompressError,
-    DownloadBatchError,
-    DownloadError,
+    DownloadProgress,
+    DownloadScheduler,
     FileHandlePool,
     GlobalChunkTask,
-    HASH_TYPE_HKDF,
-    HASH_TYPE_SHA256,
+    WriteTarget,
+)
+from riotmanifest.manifest import (
+    DecompressError,
+    DownloadError,
     PatcherBundle,
     PatcherFile,
     PatcherManifest,
-    WriteTarget,
 )
 
 
@@ -39,7 +42,30 @@ def _make_manifest(path: Path) -> PatcherManifest:
     manifest.chunks = {}
     manifest.flags = {}
     manifest.files = {}
+    manifest.downloader = DownloadScheduler(manifest)
     return manifest
+
+
+def _make_file_with_single_chunk(
+    manifest: PatcherManifest,
+    *,
+    name: str,
+    bundle_id: int,
+    chunk_id: int,
+    chunk_size: int = 1,
+) -> PatcherFile:
+    """构造仅含单个 chunk 的测试文件."""
+    bundle = PatcherBundle(bundle_id)
+    bundle.add_chunk(chunk_id=chunk_id, size=chunk_size, target_size=chunk_size)
+    return PatcherFile(
+        name=name,
+        size=chunk_size,
+        link="",
+        flags=None,
+        chunks=bundle.chunks,
+        manifest=manifest,
+        chunk_hash_types={chunk_id: HASH_TYPE_SHA256},
+    )
 
 
 def _hkdf_reference(chunk_data: bytes) -> int:
@@ -57,8 +83,8 @@ def test_compute_chunk_hash_algorithms():
     sha256_expect = int.from_bytes(hashlib.sha256(data).digest()[:8], "little")
     hkdf_expect = _hkdf_reference(data)
 
-    assert PatcherManifest._compute_chunk_hash(data, HASH_TYPE_SHA256) == sha256_expect
-    assert PatcherManifest._compute_chunk_hash(data, HASH_TYPE_HKDF) == hkdf_expect
+    assert compute_chunk_hash(data, HASH_TYPE_SHA256) == sha256_expect
+    assert compute_chunk_hash(data, HASH_TYPE_HKDF) == hkdf_expect
 
 
 def test_build_global_task_map_keeps_hash_type(tmp_path: Path):
@@ -77,7 +103,7 @@ def test_build_global_task_map_keeps_hash_type(tmp_path: Path):
         chunk_hash_types={chunk.chunk_id: HASH_TYPE_SHA256},
     )
 
-    task_map = manifest._build_global_task_map([file])
+    task_map = manifest.downloader.build_global_task_map([file])
     target = task_map[bundle.bundle_id][0].targets[0]
     assert target.chunk_id == chunk.chunk_id
     assert target.hash_type == HASH_TYPE_SHA256
@@ -124,11 +150,11 @@ def test_process_bundle_job_hash_mismatch(tmp_path: Path):
     async def fake_fetch(self, session, bundle_id, ranges):
         return [compressed]
 
-    manifest._fetch_ranges_data = types.MethodType(fake_fetch, manifest)
+    manifest.downloader.fetch_ranges_data = types.MethodType(fake_fetch, manifest.downloader)
     file_pool = FileHandlePool(max_handles=8)
     try:
         with pytest.raises(DecompressError):
-            asyncio.run(manifest._process_bundle_job(None, job, file_pool))
+            asyncio.run(manifest.downloader.process_bundle_job(None, job, file_pool))
     finally:
         file_pool.close()
 
@@ -151,14 +177,126 @@ def test_download_files_concurrently_raise_batch_error(tmp_path: Path):
     async def fake_run_job(self, session, job, file_pool):
         raise DownloadError("mock bundle failure")
 
-    manifest._build_bundle_jobs = types.MethodType(  # type: ignore[method-assign]
+    manifest.downloader.build_bundle_jobs = types.MethodType(  # type: ignore[method-assign]
         lambda self, files: [BundleJob(bundle_id=0x4004, ranges=[ChunkRange(start=0, end=0, tasks=[])])],
-        manifest,
+        manifest.downloader,
     )
-    manifest._run_bundle_job_with_retry = types.MethodType(fake_run_job, manifest)
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(
+        fake_run_job,
+        manifest.downloader,
+    )
 
     with pytest.raises(DownloadBatchError) as exc_info:
         asyncio.run(manifest.download_files_concurrently([file], raise_on_error=True))
 
     assert len(exc_info.value.failures) == 1
     assert exc_info.value.failures[0].bundle_id == 0x4004
+
+
+def test_download_progress_reports_tick_and_bundle_events(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    first_file = _make_file_with_single_chunk(
+        manifest,
+        name="first.bin",
+        bundle_id=0x7001,
+        chunk_id=0x8101,
+    )
+    second_file = _make_file_with_single_chunk(
+        manifest,
+        name="second.bin",
+        bundle_id=0x7002,
+        chunk_id=0x8102,
+    )
+
+    jobs = [
+        BundleJob(bundle_id=0x7001, ranges=[ChunkRange(start=0, end=9, tasks=[])]),
+        BundleJob(bundle_id=0x7002, ranges=[ChunkRange(start=10, end=29, tasks=[])]),
+    ]
+
+    async def fake_run_job(self, session, job, file_pool):  # pylint: disable=unused-argument
+        await asyncio.sleep(0.03)
+
+    manifest.downloader.build_bundle_jobs = types.MethodType(
+        lambda self, files: jobs,  # pylint: disable=unused-argument
+        manifest.downloader,
+    )
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(
+        fake_run_job,
+        manifest.downloader,
+    )
+
+    events: list[DownloadProgress] = []
+    results = asyncio.run(
+        manifest.download_files_concurrently(
+            [first_file, second_file],
+            concurrency_limit=1,
+            progress_callback=events.append,
+            progress_interval_seconds=0.01,
+        )
+    )
+
+    assert results == (True, True)
+    assert events[0].phase == "start"
+    assert any(event.phase == "tick" for event in events)
+    assert sum(1 for event in events if event.phase == "bundle_completed") == 2
+
+    final = events[-1]
+    assert final.phase == "completed"
+    assert final.total_jobs == 2
+    assert final.finished_jobs == 2
+    assert final.succeeded_jobs == 2
+    assert final.failed_jobs == 0
+    assert final.total_bytes == 30
+    assert final.finished_bytes == 30
+    assert final.progress == 1.0
+    assert final.average_speed_bytes_per_sec > 0.0
+
+
+def test_download_progress_failed_event_when_bundle_errors(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    first_file = _make_file_with_single_chunk(
+        manifest,
+        name="ok.bin",
+        bundle_id=0x9001,
+        chunk_id=0x9101,
+    )
+    second_file = _make_file_with_single_chunk(
+        manifest,
+        name="bad.bin",
+        bundle_id=0x9002,
+        chunk_id=0x9102,
+    )
+
+    jobs = [
+        BundleJob(bundle_id=0x9001, ranges=[ChunkRange(start=0, end=7, tasks=[])]),
+        BundleJob(bundle_id=0x9002, ranges=[ChunkRange(start=8, end=15, tasks=[])]),
+    ]
+
+    async def fake_run_job(self, session, job, file_pool):  # pylint: disable=unused-argument
+        if job.bundle_id == 0x9002:
+            raise DownloadError("mock failed")
+        await asyncio.sleep(0.01)
+
+    manifest.downloader.build_bundle_jobs = types.MethodType(
+        lambda self, files: jobs,  # pylint: disable=unused-argument
+        manifest.downloader,
+    )
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(
+        fake_run_job,
+        manifest.downloader,
+    )
+
+    events: list[DownloadProgress] = []
+    results = asyncio.run(
+        manifest.download_files_concurrently(
+            [first_file, second_file],
+            concurrency_limit=1,
+            raise_on_error=False,
+            progress_callback=events.append,
+            progress_interval_seconds=0.01,
+        )
+    )
+
+    assert results == (True, False)
+    assert any(event.phase == "bundle_failed" for event in events)
+    assert events[-1].phase == "failed"
