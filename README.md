@@ -102,6 +102,32 @@ print(len(data))
 ```
 该方法无需下载完整WAD文件，直接从manifest中计算需要解包的文件位置，直接获取，减少网络请求。
 
+可选：直接写入磁盘，避免在调用方持有大量 `bytes`：
+
+```python
+outputs = we.extract_files_to_disk(
+    {
+        "DATA/FINAL/Maps/Shipping/Map11/Map11.wad.client": [
+            "data/maps/shipping/map11/map11.bin",
+        ]
+    },
+    output_dir="./out_wad",
+)
+print(outputs)
+```
+
+- RiotGameData（显式构造 Extractor）
+
+```python
+from riotmanifest.game import RiotGameData
+
+rgd = RiotGameData()
+rgd.load_game_data(regions=["EUW1"])
+
+# 不再在 load_game_data 中隐式创建 WADExtractor，改为按需显式构造
+game_extractor = rgd.build_game_extractor("EUW1", cache_max_entries=256)
+```
+
 
 ### 维护者
 **Virace**

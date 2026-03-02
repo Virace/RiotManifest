@@ -1,4 +1,4 @@
-"""manifest 下载管线核心离线单测。"""
+"""manifest 下载管线核心离线单测."""
 
 import asyncio
 import hashlib
@@ -10,6 +10,8 @@ import pytest
 import pyzstd
 
 from riotmanifest.manifest import (
+    HASH_TYPE_HKDF,
+    HASH_TYPE_SHA256,
     BundleJob,
     ChunkRange,
     DecompressError,
@@ -17,8 +19,6 @@ from riotmanifest.manifest import (
     DownloadError,
     FileHandlePool,
     GlobalChunkTask,
-    HASH_TYPE_HKDF,
-    HASH_TYPE_SHA256,
     PatcherBundle,
     PatcherFile,
     PatcherManifest,

@@ -1,11 +1,4 @@
-# -*- coding: utf-8 -*-
-# @Author  : Virace
-# @Email   : Virace@aliyun.com
-# @Site    : x-item.com
-# @Software: Pycharm
-# @Create  : 2024/3/16 15:28
-# @Update  : 2024/9/5 16:32
-# @Detail  : 
+"""riotmanifest 包导出入口."""
 
 from loguru import logger
 

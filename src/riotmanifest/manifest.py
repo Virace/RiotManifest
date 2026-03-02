@@ -1,14 +1,6 @@
-# -*- coding: utf-8 -*-
-# @Author  : Virace
-# @Email   : Virace@aliyun.com
-# @Site    : x-item.com
-# @Software: Pycharm
-# @Create  : 2024/3/12 22:46
-# @Update  : 2025/3/11 16:17
-# @Detail  : manifest.py
+"""Riot manifest 解析与并发下载核心实现."""
 
 import asyncio
-from collections import OrderedDict
 import hashlib
 import hmac
 import io
@@ -17,14 +9,16 @@ import os.path
 import re
 import struct
 import threading
+from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import BinaryIO, Iterable, Optional, Tuple
-from typing import Dict, List, Union
+from typing import BinaryIO, Union
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
 import pyzstd
 from loguru import logger
+
 from riotmanifest.http_client import HttpClientError, http_get_bytes
 
 try:
@@ -42,24 +36,30 @@ StrPath = Union[str, "os.PathLike[str]"]
 
 
 class DownloadError(Exception):
+    """下载流程异常."""
+
     pass
 
 
 class DecompressError(Exception):
+    """解压流程异常."""
+
     pass
 
 
 @dataclass
 class BundleJobFailure:
+    """单个 bundle 任务失败信息."""
+
     bundle_id: int
     error: Exception
 
 
 class DownloadBatchError(DownloadError):
-    """批量下载存在失败任务时抛出的异常。"""
+    """批量下载存在失败任务时抛出的异常。."""
 
-    def __init__(self, failures: List[BundleJobFailure]):
-        """初始化批量下载异常。
+    def __init__(self, failures: list[BundleJobFailure]):
+        """初始化批量下载异常。.
 
         Args:
             failures: 失败的 bundle 任务列表。
@@ -72,36 +72,45 @@ class DownloadBatchError(DownloadError):
 
 
 class BinaryParser:
-    """Helper class to read from binary file object"""
+    """Helper class to read from binary file object."""
 
     def __init__(self, f: BinaryIO):
+        """初始化二进制读取器."""
         self.f = f
 
     def tell(self):
+        """返回当前读取偏移."""
         return self.f.tell()
 
     def seek(self, position: int):
+        """跳转到绝对偏移."""
         self.f.seek(position, 0)
 
     def skip(self, amount: int):
+        """相对向前跳过字节数."""
         self.f.seek(amount, 1)
 
     def rewind(self, amount: int):
+        """相对向后回退字节数."""
         self.f.seek(-amount, 1)
 
     def unpack(self, fmt: str):
+        """按 struct 格式读取并解包."""
         length = struct.calcsize(fmt)
         return struct.unpack(fmt, self.f.read(length))
 
     def raw(self, length: int):
+        """读取指定长度原始字节."""
         return self.f.read(length)
 
     def unpack_string(self):
-        """Unpack string prefixed by its 32-bit length"""
+        """Unpack string prefixed by its 32-bit length."""
         return self.f.read(self.unpack("<L")[0]).decode("utf-8")
 
 
 class PatcherChunk:
+    """描述 bundle 内单个 chunk 元数据."""
+
     def __init__(
         self,
         chunk_id: int,
@@ -110,34 +119,40 @@ class PatcherChunk:
         size: int,
         target_size: int,
     ):
-        """
+        """初始化 chunk 元数据.
 
-        :param chunk_id:
-        :param bundle:
-        :param offset:
-        :param size:
-        :param target_size:
+        Args:
+            chunk_id: chunk 唯一标识。
+            bundle: 所属 bundle。
+            offset: chunk 在 bundle 内偏移。
+            size: chunk 压缩后大小。
+            target_size: chunk 解压后大小。
         """
         self.chunk_id: int = chunk_id
-        self.bundle: "PatcherBundle" = bundle
+        self.bundle: PatcherBundle = bundle
         self.offset: int = offset
         self.size: int = size
         self.target_size: int = target_size
 
     def __hash__(self):
+        """返回基于 chunk_id 的哈希值."""
         return self.chunk_id
 
 
 class PatcherBundle:
-    def __init__(self, bundle_id: int):
-        """
+    """描述一个 bundle 与其 chunk 列表."""
 
-        :param bundle_id:
+    def __init__(self, bundle_id: int):
+        """初始化 bundle 对象.
+
+        Args:
+            bundle_id: bundle 唯一标识。
         """
         self.bundle_id: int = bundle_id
-        self.chunks: List[PatcherChunk] = []
+        self.chunks: list[PatcherChunk] = []
 
     def add_chunk(self, chunk_id: int, size: int, target_size: int):
+        """向 bundle 追加一个 chunk 定义."""
         try:
             last_chunk = self.chunks[-1]
             offset = last_chunk.offset + last_chunk.size
@@ -148,6 +163,8 @@ class PatcherBundle:
 
 @dataclass
 class WriteTarget:
+    """单个 chunk 的文件写入目标."""
+
     file: "PatcherFile"
     file_offset: int
     expected_len: int
@@ -157,21 +174,27 @@ class WriteTarget:
 
 @dataclass
 class GlobalChunkTask:
+    """全局去重后的 chunk 下载任务."""
+
     chunk: PatcherChunk
-    targets: List[WriteTarget] = field(default_factory=list)
+    targets: list[WriteTarget] = field(default_factory=list)
 
 
 @dataclass
 class ChunkRange:
+    """bundle 内单段 range 请求定义."""
+
     start: int
     end: int
-    tasks: List[GlobalChunkTask] = field(default_factory=list)
+    tasks: list[GlobalChunkTask] = field(default_factory=list)
 
 
 @dataclass
 class BundleJob:
+    """bundle 下载任务."""
+
     bundle_id: int
-    ranges: List[ChunkRange] = field(default_factory=list)
+    ranges: list[ChunkRange] = field(default_factory=list)
 
 
 @dataclass
@@ -183,11 +206,16 @@ class _HandleEntry:
 
 
 class FileHandlePool:
-    """轻量文件句柄池，避免每次写入都重复 open/close。"""
+    """轻量文件句柄池，避免每次写入都重复 open/close。."""
 
     def __init__(self, max_handles: int = 500):
+        """初始化句柄池.
+
+        Args:
+            max_handles: 池内最多缓存的文件句柄数量。
+        """
         self.max_handles = max(1, max_handles)
-        self._handles: "OrderedDict[str, _HandleEntry]" = OrderedDict()
+        self._handles: OrderedDict[str, _HandleEntry] = OrderedDict()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -195,7 +223,7 @@ class FileHandlePool:
         with entry.file_lock:
             entry.file_obj.close()
 
-    def _evict_one_locked(self) -> List[_HandleEntry]:
+    def _evict_one_locked(self) -> list[_HandleEntry]:
         if not self._handles:
             return []
 
@@ -207,8 +235,8 @@ class FileHandlePool:
 
     def _acquire(self, path: StrPath) -> _HandleEntry:
         norm_path = os.fspath(path)
-        to_close: List[_HandleEntry] = []
-        entry: Optional[_HandleEntry] = None
+        to_close: list[_HandleEntry] = []
+        entry: _HandleEntry | None = None
         try:
             with self._lock:
                 if norm_path in self._handles:
@@ -220,7 +248,7 @@ class FileHandlePool:
                 while len(self._handles) >= self.max_handles:
                     to_close.extend(self._evict_one_locked())
 
-                file_obj = open(norm_path, "r+b", buffering=0)
+                file_obj = io.FileIO(norm_path, mode="r+")
                 entry = _HandleEntry(file_obj=file_obj, file_lock=threading.Lock(), refs=1)
                 self._handles[norm_path] = entry
                 return entry
@@ -237,6 +265,7 @@ class FileHandlePool:
             self._close_entry(entry)
 
     def write_at(self, path: StrPath, data: bytes, offset: int):
+        """向目标文件指定偏移写入字节数据."""
         entry = self._acquire(path)
         try:
             with entry.file_lock:
@@ -246,7 +275,8 @@ class FileHandlePool:
             self._release(entry)
 
     def close(self):
-        to_close: List[_HandleEntry] = []
+        """关闭并清空池内所有句柄."""
+        to_close: list[_HandleEntry] = []
         with self._lock:
             handles = list(self._handles.values())
             self._handles.clear()
@@ -260,17 +290,19 @@ class FileHandlePool:
 
 
 class PatcherFile:
+    """manifest 中文件元数据及下载接口."""
+
     def __init__(
         self,
         name: str,
         size: int,
         link: str,
-        flags: Optional[List[str]],
-        chunks: List[PatcherChunk],
+        flags: list[str] | None,
+        chunks: list[PatcherChunk],
         manifest: "PatcherManifest",
-        chunk_hash_types: Optional[Dict[int, int]] = None,
+        chunk_hash_types: dict[int, int] | None = None,
     ):
-        """初始化补丁文件对象。
+        """初始化补丁文件对象。.
 
         `hexdigest()` 不是文件字节哈希，而是由 chunk_id 列表计算出的摘要，
         可用于下载前判断文件内容是否一致。
@@ -287,16 +319,16 @@ class PatcherFile:
         self.name: str = name
         self.size: int = size
         self.link: str = link
-        self.flags: Optional[List[str]] = flags
+        self.flags: list[str] | None = flags
 
-        self.chunks: List[PatcherChunk] = chunks
-        self.manifest: "PatcherManifest" = manifest
-        self.chunk_hash_types: Dict[int, int] = chunk_hash_types or {}
+        self.chunks: list[PatcherChunk] = chunks
+        self.manifest: PatcherManifest = manifest
+        self.chunk_hash_types: dict[int, int] = chunk_hash_types or {}
 
         self.chunk_cache = {}
 
     def hexdigest(self):
-        """Compute a hash unique for this file content"""
+        """Compute a hash unique for this file content."""
         m = hashlib.sha1()
         for chunk in self.chunks:
             m.update(b"%016X" % chunk.chunk_id)
@@ -304,7 +336,7 @@ class PatcherFile:
 
     @staticmethod
     def langs_predicate(langs):
-        """Return a predicate function for a locale filtering parameter"""
+        """Return a predicate function for a locale filtering parameter."""
         if langs is False:
             # assume only locales flags follow this pattern
             return lambda f: f.flags is None or not any("_" in f and len(f) == 5 for f in f.flags)
@@ -315,8 +347,7 @@ class PatcherFile:
             return lambda f: f.flags is not None and any(f.lower() == lang for f in f.flags)
 
     def _verify_file(self, path: StrPath) -> bool:
-        """
-        按文件大小进行快速校验。
+        """按文件大小进行快速校验。.
 
         :param path: 文件路径
         :return: 校验通过返回 True，否则返回 False。
@@ -326,8 +357,8 @@ class PatcherFile:
             return True
         return False
 
-    async def download_file(self, path: StrPath, concurrency_limit: Optional[int] = None) -> bool:
-        """下载单个文件（委托给 Manifest 全局调度器）。
+    async def download_file(self, path: StrPath, concurrency_limit: int | None = None) -> bool:
+        """下载单个文件（委托给 Manifest 全局调度器）。.
 
         Args:
             path: 文件保存目录。
@@ -344,7 +375,7 @@ class PatcherFile:
         return bool(results and results[0])
 
     def download_chunk(self, chunk: "PatcherChunk") -> bytes:
-        """下载并解压单个 chunk（同步方法）。
+        """下载并解压单个 chunk（同步方法）。.
 
         Args:
             chunk: 需要下载的 chunk 对象。
@@ -393,9 +424,8 @@ class PatcherFile:
         self.chunk_cache[chunk.chunk_id] = decompressed_data
         return decompressed_data
 
-    def download_chunks(self, chunks: List["PatcherChunk"]) -> bytes:
-        """
-        下载并解压缩多个chunk，并将它们的内容拼接成一个字节串。
+    def download_chunks(self, chunks: list["PatcherChunk"]) -> bytes:
+        """下载并解压缩多个chunk，并将它们的内容拼接成一个字节串。.
 
         :param chunks: 需要下载的PatcherChunk对象列表。
         :return: 拼接后的解压缩内容字节数据。
@@ -407,6 +437,8 @@ class PatcherFile:
 
 
 class PatcherManifest:
+    """manifest 解析、索引构建与并发下载调度器."""
+
     DEFAULT_GAP_TOLERANCE = 32 * 1024
     DEFAULT_MAX_RANGES_PER_REQUEST = 30
     DEFAULT_MIN_TRANSFER_SPEED_BYTES = 50 * 1024
@@ -416,13 +448,13 @@ class PatcherManifest:
 
     def __init__(
         self,
-        file: Optional[StrPath],
+        file: StrPath | None,
         path: StrPath,
         bundle_url: str = "https://lol.dyn.riotcdn.net/channels/public/bundles/",
         concurrency_limit: int = 16,
         max_retries: int = RETRY_LIMIT,
     ):
-        """初始化 manifest 对象并完成解析。
+        """初始化 manifest 对象并完成解析。.
 
         Args:
             file: 本地 manifest 路径或远程 manifest URL。
@@ -436,9 +468,9 @@ class PatcherManifest:
         """
         self.file = file
         self.bundles: Iterable[PatcherBundle] = {}
-        self.chunks: Dict[int, PatcherChunk] = {}
-        self.flags: Dict[int, str] = {}
-        self.files: Dict[str, PatcherFile] = {}
+        self.chunks: dict[int, PatcherChunk] = {}
+        self.flags: dict[int, str] = {}
+        self.files: dict[str, PatcherFile] = {}
 
         self.path = path
         self.bundle_url = bundle_url
@@ -474,8 +506,8 @@ class PatcherManifest:
         with open(output, "wb") as f:
             f.truncate(file.size)
 
-    def _build_global_task_map(self, files: List[PatcherFile]) -> Dict[int, List[GlobalChunkTask]]:
-        chunk_index: Dict[int, GlobalChunkTask] = {}
+    def _build_global_task_map(self, files: list[PatcherFile]) -> dict[int, list[GlobalChunkTask]]:
+        chunk_index: dict[int, GlobalChunkTask] = {}
 
         for file in files:
             file_offset = 0
@@ -493,7 +525,7 @@ class PatcherManifest:
                     chunk_index[chunk.chunk_id] = GlobalChunkTask(chunk=chunk, targets=[target])
                 file_offset += chunk.target_size
 
-        bundle_map: Dict[int, List[GlobalChunkTask]] = {}
+        bundle_map: dict[int, list[GlobalChunkTask]] = {}
         for task in chunk_index.values():
             bundle_id = task.chunk.bundle.bundle_id
             bundle_map.setdefault(bundle_id, []).append(task)
@@ -503,15 +535,15 @@ class PatcherManifest:
         return bundle_map
 
     @staticmethod
-    def _merge_ranges(tasks: List[GlobalChunkTask], gap_tolerance: int) -> List[ChunkRange]:
+    def _merge_ranges(tasks: list[GlobalChunkTask], gap_tolerance: int) -> list[ChunkRange]:
         valid_tasks = [task for task in tasks if task.chunk.size > 0]
         if not valid_tasks:
             return []
 
-        ranges: List[ChunkRange] = []
+        ranges: list[ChunkRange] = []
         start = valid_tasks[0].chunk.offset
         end = start + valid_tasks[0].chunk.size - 1
-        current_tasks: List[GlobalChunkTask] = [valid_tasks[0]]
+        current_tasks: list[GlobalChunkTask] = [valid_tasks[0]]
 
         for task in valid_tasks[1:]:
             task_start = task.chunk.offset
@@ -529,9 +561,9 @@ class PatcherManifest:
         ranges.append(ChunkRange(start=start, end=end, tasks=current_tasks))
         return ranges
 
-    def _build_bundle_jobs(self, files: List[PatcherFile]) -> List[BundleJob]:
+    def _build_bundle_jobs(self, files: list[PatcherFile]) -> list[BundleJob]:
         bundle_map = self._build_global_task_map(files)
-        jobs: List[BundleJob] = []
+        jobs: list[BundleJob] = []
 
         for bundle_id, tasks in bundle_map.items():
             ranges = self._merge_ranges(tasks, self.gap_tolerance)
@@ -543,12 +575,12 @@ class PatcherManifest:
         return jobs
 
     @staticmethod
-    def _build_range_header(ranges: List[ChunkRange]) -> str:
+    def _build_range_header(ranges: list[ChunkRange]) -> str:
         return "bytes=" + ",".join(f"{chunk_range.start}-{chunk_range.end}" for chunk_range in ranges)
 
     @classmethod
     def _dynamic_request_timeout(cls, total_bytes: int) -> aiohttp.ClientTimeout:
-        """按请求数据量计算动态超时。"""
+        """按请求数据量计算动态超时。."""
         size_factor = total_bytes / float(cls.DEFAULT_MIN_TRANSFER_SPEED_BYTES)
         timeout_seconds = cls.DEFAULT_BASE_TIMEOUT_SECONDS + int(size_factor)
         timeout_seconds = min(timeout_seconds, cls.DEFAULT_MAX_TIMEOUT_SECONDS)
@@ -557,7 +589,7 @@ class PatcherManifest:
 
     @staticmethod
     def _hkdf_hash(chunk_data: bytes) -> int:
-        """按 RMAN 规则计算 HKDF 派生哈希（uint64）。"""
+        """按 RMAN 规则计算 HKDF 派生哈希（uint64）。."""
         prk = hashlib.sha256(chunk_data).digest()
         buffer = hmac.new(prk, b"\x00\x00\x00\x01", hashlib.sha256).digest()
         result = int.from_bytes(buffer[:8], "little")
@@ -567,8 +599,8 @@ class PatcherManifest:
         return result
 
     @staticmethod
-    def _compute_chunk_hash(chunk_data: bytes, hash_type: int) -> Optional[int]:
-        """按 hash_type 计算 chunk 哈希并返回 uint64。"""
+    def _compute_chunk_hash(chunk_data: bytes, hash_type: int) -> int | None:
+        """按 hash_type 计算 chunk 哈希并返回 uint64。."""
         if hash_type == HASH_TYPE_SHA256:
             digest = hashlib.sha256(chunk_data).digest()
             return int.from_bytes(digest[:8], "little")
@@ -587,7 +619,7 @@ class PatcherManifest:
         raise DecompressError(f"不支持的 Chunk 哈希类型: {hash_type}")
 
     def _validate_chunk_hash(self, chunk_data: bytes, chunk_id: int, hash_type: int):
-        """校验解压后的 chunk 数据哈希是否与 chunk_id 一致。"""
+        """校验解压后的 chunk 数据哈希是否与 chunk_id 一致。."""
         computed = self._compute_chunk_hash(chunk_data, hash_type)
         if computed is None:
             return
@@ -597,8 +629,8 @@ class PatcherManifest:
             )
 
     @staticmethod
-    def _extract_ranges_from_full_body(payload: bytes, ranges: List[ChunkRange], bundle_id: int) -> List[bytes]:
-        outputs: List[bytes] = []
+    def _extract_ranges_from_full_body(payload: bytes, ranges: list[ChunkRange], bundle_id: int) -> list[bytes]:
+        outputs: list[bytes] = []
         payload_len = len(payload)
         for chunk_range in ranges:
             if payload_len < chunk_range.end + 1:
@@ -612,13 +644,13 @@ class PatcherManifest:
     async def _parse_multipart_response(
         self,
         response: aiohttp.ClientResponse,
-        ranges: List[ChunkRange],
+        ranges: list[ChunkRange],
         bundle_id: int,
-    ) -> List[bytes]:
+    ) -> list[bytes]:
         reader = aiohttp.MultipartReader.from_response(response)
         index_by_range = {(chunk_range.start, chunk_range.end): idx for idx, chunk_range in enumerate(ranges)}
-        mapped_parts: List[Optional[bytes]] = [None] * len(ranges)
-        fallback_parts: List[bytes] = []
+        mapped_parts: list[bytes | None] = [None] * len(ranges)
+        fallback_parts: list[bytes] = []
 
         while True:
             part = await reader.next()
@@ -661,8 +693,8 @@ class PatcherManifest:
         self,
         session: aiohttp.ClientSession,
         bundle_id: int,
-        ranges: List[ChunkRange],
-    ) -> List[bytes]:
+        ranges: list[ChunkRange],
+    ) -> list[bytes]:
         if not ranges:
             return []
 
@@ -702,7 +734,7 @@ class PatcherManifest:
                         f"actual={len(range_payloads)}"
                     )
 
-                for chunk_range, payload in zip(ranges, range_payloads):
+                for chunk_range, payload in zip(ranges, range_payloads, strict=False):
                     expected_size = chunk_range.end - chunk_range.start + 1
                     if len(payload) != expected_size:
                         raise DownloadError(
@@ -710,7 +742,7 @@ class PatcherManifest:
                             f"actual={len(payload)}, expected={expected_size}"
                         )
                 return range_payloads
-        except (aiohttp.ClientError, asyncio.TimeoutError, DownloadError) as e:
+        except (TimeoutError, aiohttp.ClientError, DownloadError) as e:
             raise DownloadError(f"下载 bundle {bundle_id:016X} ranges 失败: {e}") from e
 
     async def _process_bundle_job(
@@ -725,7 +757,7 @@ class PatcherManifest:
             ranges=job.ranges,
         )
 
-        for chunk_range, range_data in zip(job.ranges, range_payloads):
+        for chunk_range, range_data in zip(job.ranges, range_payloads, strict=False):
 
             for task in chunk_range.tasks:
                 chunk = task.chunk
@@ -774,7 +806,7 @@ class PatcherManifest:
         job: BundleJob,
         file_pool: FileHandlePool,
     ):
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for attempt in range(self.max_retries):
             try:
                 await self._process_bundle_job(session=session, job=job, file_pool=file_pool)
@@ -789,16 +821,14 @@ class PatcherManifest:
         )
 
     def filter_files(
-        self, pattern: Optional[str] = None, flag: Union[str, List[str], None] = None
+        self, pattern: str | None = None, flag: str | list[str] | None = None
     ) -> Iterable["PatcherFile"]:
-        """
-        使用提供的名称模式和标志从清单中过滤文件。
+        """使用提供的名称模式和标志从清单中过滤文件。.
 
         :param pattern: 用于匹配文件的名称模式。如果为None，则不应用名称过滤。
         :param flag: 用于匹配文件的标志字符串或标志字符串列表。如果为None，则不应用标志过滤。
         :return: 匹配提供的名称模式和标志字符串的PatcherFile对象的可迭代对象。
         """
-
         if isinstance(flag, str):
             flag = [flag]
 
@@ -835,11 +865,11 @@ class PatcherManifest:
 
     async def download_files_concurrently(
         self,
-        files: List[PatcherFile],
-        concurrency_limit: Optional[int] = None,
+        files: list[PatcherFile],
+        concurrency_limit: int | None = None,
         raise_on_error: bool = True,
-    ) -> Tuple[bool, ...]:
-        """全局并发下载多个文件。
+    ) -> tuple[bool, ...]:
+        """全局并发下载多个文件。.
 
         关键策略：
         1. 按 ChunkID 全局去重，再按 Bundle 分组。
@@ -857,9 +887,9 @@ class PatcherManifest:
         Raises:
             DownloadBatchError: 存在失败 bundle 且 raise_on_error=True 时抛出。
         """
-        def build_results(target_files: List[PatcherFile], failed_bundle_ids: Optional[set[int]] = None) -> Tuple[bool, ...]:
+        def build_results(target_files: list[PatcherFile], failed_bundle_ids: set[int] | None = None) -> tuple[bool, ...]:
             failed_bundle_ids = failed_bundle_ids or set()
-            results: List[bool] = []
+            results: list[bool] = []
             for target_file in target_files:
                 if target_file.link:
                     results.append(True)
@@ -878,14 +908,14 @@ class PatcherManifest:
             return tuple()
 
         # 保持输入顺序去重，避免重复统计同一文件
-        seen_files: Dict[str, PatcherFile] = {}
-        ordered_files: List[PatcherFile] = []
+        seen_files: dict[str, PatcherFile] = {}
+        ordered_files: list[PatcherFile] = []
         for file in files:
             if file.name not in seen_files:
                 seen_files[file.name] = file
                 ordered_files.append(file)
 
-        pending_files: List[PatcherFile] = []
+        pending_files: list[PatcherFile] = []
         for file in ordered_files:
             if file.link:
                 continue
@@ -915,7 +945,7 @@ class PatcherManifest:
         for job in jobs:
             queue.put_nowait(job)
 
-        errors: List[BundleJobFailure] = []
+        errors: list[BundleJobFailure] = []
         error_lock = asyncio.Lock()
 
         async def worker():
@@ -951,6 +981,7 @@ class PatcherManifest:
         return build_results(files)
 
     def parse_rman(self, f: BinaryIO):
+        """解析 rman 头部并解压进入主体解析流程."""
         parser = BinaryParser(f)
 
         magic, version_major, version_minor = parser.unpack("<4sBB")
@@ -967,6 +998,7 @@ class PatcherManifest:
         return self.parse_body(f)
 
     def parse_body(self, f: BinaryIO):
+        """解析 manifest 主体并构建 bundle/file 索引."""
         parser = BinaryParser(f)
 
         # header (unknown values, skip it)
@@ -990,7 +1022,7 @@ class PatcherManifest:
         file_entries = list(self._parse_table(parser, self._parse_file_entry))
         parser.seek(offsets[3])
         directories = {did: (name, parent) for name, did, parent in self._parse_table(parser, self._parse_directory)}
-        parameter_hash_types: List[int] = []
+        parameter_hash_types: list[int] = []
         if len(offsets) > 5 and offsets[5] > 0:
             parser.seek(offsets[5])
             parameter_hash_types = list(self._parse_table(parser, self._parse_parameter))
@@ -1001,10 +1033,7 @@ class PatcherManifest:
             while dir_id is not None:
                 dir_name, dir_id = directories[dir_id]
                 name = f"{dir_name}/{name}"
-            if flag_ids is not None:
-                flags = [self.flags[i] for i in flag_ids]
-            else:
-                flags = None
+            flags = [self.flags[i] for i in flag_ids] if flag_ids is not None else None
             file_chunks = [self.chunks[chunk_id] for chunk_id in chunk_ids]
             hash_type = 0
             if param_index is not None and 0 <= param_index < len(parameter_hash_types):
@@ -1035,7 +1064,7 @@ class PatcherManifest:
 
     @classmethod
     def _parse_bundle(cls, parser):
-        """Parse a bundle entry"""
+        """Parse a bundle entry."""
 
         def parse_chunklist(_):
             fields = cls._parse_field_table(parser, (
@@ -1066,9 +1095,7 @@ class PatcherManifest:
 
     @classmethod
     def _parse_file_entry(cls, parser):
-        """Parse a file entry
-        (name, link, flag_ids, directory_id, filesize, chunk_ids, param_index)
-        """
+        """Parse a file entry and return normalized metadata tuple."""
         fields = cls._parse_field_table(parser, (
             ('file_id', '<Q'),
             ('directory_id', '<Q'),
@@ -1086,10 +1113,7 @@ class PatcherManifest:
         ))
 
         flag_mask = fields['flags']
-        if flag_mask:
-            flag_ids = [i+1 for i in range(64) if flag_mask & (1 << i)]
-        else:
-            flag_ids = None
+        flag_ids = [i + 1 for i in range(64) if flag_mask & 1 << i] if flag_mask else None
 
         parser.seek(fields['chunks'])
         chunk_count, = parser.unpack('<L')  # _ == 0
@@ -1118,9 +1142,7 @@ class PatcherManifest:
 
     @classmethod
     def _parse_directory(cls, parser):
-        """Parse a directory entry
-        (name, directory_id, parent_id)
-        """
+        """Parse a directory entry and return (name, directory_id, parent_id)."""
         fields = cls._parse_field_table(parser, (
             ('directory_id', '<Q'),
             ('parent_id', '<Q'),
@@ -1139,10 +1161,10 @@ class PatcherManifest:
         noffsets = (vtable_size - 4) // 2
         offsets = parser.unpack(f'<{noffsets}H')
 
-        for i, field in enumerate(fields):
-            if field is None:
+        for i, field_def in enumerate(fields):
+            if field_def is None:
                 continue
-            name, fmt = field
+            name, fmt = field_def
             if i >= noffsets or (offset := offsets[i]) == 0 or fmt is None:
                 value = None
             else:

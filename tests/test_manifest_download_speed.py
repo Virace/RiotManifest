@@ -2,7 +2,6 @@ import asyncio
 import os
 import tempfile
 import time
-from typing import List, Tuple
 
 import pytest
 
@@ -26,14 +25,14 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _pick_files(
-    files: List[PatcherFile],
+    files: list[PatcherFile],
     suffix: str,
     target_bytes: int,
     max_files: int,
     min_file_bytes: int,
     max_file_bytes: int,
     prefer_many_files: bool,
-) -> Tuple[List[PatcherFile], int]:
+) -> tuple[list[PatcherFile], int]:
     suffix = suffix.lower()
 
     # 优先压测 .wad.client 文件
@@ -49,7 +48,7 @@ def _pick_files(
     # 否则优先大文件以更快达到目标流量。
     candidates.sort(key=lambda f: f.size, reverse=not prefer_many_files)
 
-    selected: List[PatcherFile] = []
+    selected: list[PatcherFile] = []
     total = 0
     for file in candidates:
         if len(selected) >= max_files:
@@ -97,8 +96,7 @@ def _load_latest_game_with_retry(region: str, retries: int, retry_delay_sec: flo
 
 @pytest.mark.integration
 def test_game_manifest_overall_download_speed():
-    """
-    真实清单压力测速（网络集成测试，pytest 版本）。
+    """真实清单压力测速（网络集成测试，pytest 版本）.
 
     运行开关：
       RIOT_PERF_RUN=1
