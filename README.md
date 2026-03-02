@@ -100,21 +100,34 @@ if __name__ == "__main__":
 ```
 
 ### 性能基线（2026-03-02）
-以下结果来自仓库内测试 `tests/test_manifest_download_speed.py`（真实网络集成测试）：
+以下结果来自仓库内真实网络集成测试（同一日期，不同样本规模）：
 
 ```bash
 RIOT_PERF_RUN=1 ./scripts/_uv.sh run pytest -q -s tests/test_manifest_download_speed.py
 ```
 
-本次结果（EUW1，默认并发 16，优先筛选 `filter_files(flag='zh_CN', pattern='wad.client')`）：
+结果一：常规压力样本（EUW1，默认并发 16，优先筛选 `filter_files(flag='zh_CN', pattern='wad.client')`）：
 - manifest：`https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest`
 - 样本：`files=92`，`planned=515.14MB`
 - 吞吐：`63.61MB/s`（`elapsed=8.098s`）
 - 调度：`jobs=126`，`ranges=142`，`unique_chunks=1410`
 
-与 README 早期历史信息对比：
-- 历史（2024）：文档标注“多并发下载不推荐，建议不超过 10”。
-- 当前（2026）：默认并发已调整为 `16`，并发下载作为推荐路径，实测吞吐可稳定在几十 MB/s 量级（受网络波动影响）。
+结果二：全量中文 `wad.client` 传输层对比样本（并发 16）：
+
+```bash
+RIOT_TRANSPORT_BENCH_RUN=1 RIOT_TRANSPORT_MODE=both ./scripts/_uv.sh run pytest -q -s tests/test_downloader_transport_compare.py
+```
+
+- manifest：`https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest`
+- 样本：`files=212`，`planned=3605.73MB`（全量 `zh_CN + wad.client`）
+- `aiohttp` 吞吐：`117.51MB/s`（`elapsed=30.685s`）
+- `urllib3` 吞吐：`113.00MB/s`（`elapsed=31.910s`）
+- 速度比：`urllib3 / aiohttp = 0.962`
+
+结论：
+- 吞吐会受网络波动明显影响，单次结果有起伏。
+- 在当前下载策略（chunk 去重 + bundle job + multi-range）和当前环境下，已可基本跑满带宽。
+- 传输层上 `aiohttp` 与 `urllib3` 差距不大，当前实测 `aiohttp` 略优。
 
 
 - WADExtractor
