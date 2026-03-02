@@ -1,6 +1,6 @@
 [project]
 name = "riotmanifest"
-version = "1.1.9"
+version = "2.0.0"
 description = "Add your description here"
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
@@ -15,6 +15,7 @@ dependencies = [
 ]
 readme = "README.md"
 license = "GPL-3.0"
+license-files = ["LICENSE"]
 requires-python = ">= 3.10"
 homepage = "https://github.com/Virace/RiotManifest"
 repository = "https://github.com/Virace/RiotManifest"
@@ -29,8 +30,20 @@ managed = true
 [tool.hatch.metadata]
 allow-direct-references = true
 
+[tool.hatch.build]
+ignore-vcs = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/riotmanifest"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+]
+exclude = [".gitignore"]
 
 [dependency-groups]
 dev = [
