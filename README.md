@@ -103,7 +103,7 @@ if __name__ == "__main__":
 以下结果来自仓库内真实网络集成测试（同一日期，不同样本规模）：
 
 ```bash
-RIOT_PERF_RUN=1 ./scripts/_uv.sh run pytest -q -s tests/test_manifest_download_speed.py
+RIOT_PERF_RUN=1 uv run pytest -q -s tests/test_manifest_download_speed.py
 ```
 
 结果一：常规压力样本（EUW1，默认并发 16，优先筛选 `filter_files(flag='zh_CN', pattern='wad.client')`）：
@@ -115,7 +115,7 @@ RIOT_PERF_RUN=1 ./scripts/_uv.sh run pytest -q -s tests/test_manifest_download_s
 结果二：全量中文 `wad.client` 传输层对比样本（并发 16）：
 
 ```bash
-RIOT_TRANSPORT_BENCH_RUN=1 RIOT_TRANSPORT_MODE=both ./scripts/_uv.sh run pytest -q -s tests/test_downloader_transport_compare.py
+RIOT_TRANSPORT_BENCH_RUN=1 RIOT_TRANSPORT_MODE=both uv run pytest -q -s tests/test_downloader_transport_compare.py
 ```
 
 - manifest：`https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest`
