@@ -65,6 +65,40 @@ if __name__ == '__main__':
 - 如果你的网络/磁盘较弱，可把并发改到 `8~12`；
 - 如果机器配置较好且网络稳定，可尝试 `16~24` 并发。
 
+- **下载进度与速度监控（时间周期 + 每个 Bundle Job）**
+```python
+import asyncio
+from riotmanifest import DownloadProgress, PatcherManifest
+
+
+def on_progress(progress: DownloadProgress) -> None:
+    speed_mb = progress.average_speed_bytes_per_sec / (1024 * 1024)
+    print(
+        f"[{progress.phase}] "
+        f"jobs={progress.finished_jobs}/{progress.total_jobs} "
+        f"bytes={progress.finished_bytes}/{progress.total_bytes} "
+        f"speed={speed_mb:.2f}MB/s "
+        f"bundle={progress.bundle_id}"
+    )
+
+
+async def main():
+    manifest = PatcherManifest(
+        "https://lol.secure.dyn.riotcdn.net/channels/public/releases/CB3A1B2A17ED9AAB.manifest",
+        path="./out",
+    )
+    files = list(manifest.filter_files(flag="zh_CN", pattern="wad.client"))
+    await manifest.download_files_concurrently(
+        files,
+        progress_callback=on_progress,
+        progress_interval_seconds=1.0,  # 每 1 秒发一次 tick，同时保留每个 bundle 事件
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
 ### 性能基线（2026-03-02）
 以下结果来自仓库内测试 `tests/test_manifest_download_speed.py`（真实网络集成测试）：
 

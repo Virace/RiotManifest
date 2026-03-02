@@ -14,6 +14,7 @@ from riotmanifest.core.errors import DownloadBatchError
 from riotmanifest.downloader import (
     BundleJob,
     ChunkRange,
+    DownloadProgress,
     DownloadScheduler,
     FileHandlePool,
     GlobalChunkTask,
@@ -43,6 +44,28 @@ def _make_manifest(path: Path) -> PatcherManifest:
     manifest.files = {}
     manifest.downloader = DownloadScheduler(manifest)
     return manifest
+
+
+def _make_file_with_single_chunk(
+    manifest: PatcherManifest,
+    *,
+    name: str,
+    bundle_id: int,
+    chunk_id: int,
+    chunk_size: int = 1,
+) -> PatcherFile:
+    """构造仅含单个 chunk 的测试文件."""
+    bundle = PatcherBundle(bundle_id)
+    bundle.add_chunk(chunk_id=chunk_id, size=chunk_size, target_size=chunk_size)
+    return PatcherFile(
+        name=name,
+        size=chunk_size,
+        link="",
+        flags=None,
+        chunks=bundle.chunks,
+        manifest=manifest,
+        chunk_hash_types={chunk_id: HASH_TYPE_SHA256},
+    )
 
 
 def _hkdf_reference(chunk_data: bytes) -> int:
@@ -168,3 +191,112 @@ def test_download_files_concurrently_raise_batch_error(tmp_path: Path):
 
     assert len(exc_info.value.failures) == 1
     assert exc_info.value.failures[0].bundle_id == 0x4004
+
+
+def test_download_progress_reports_tick_and_bundle_events(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    first_file = _make_file_with_single_chunk(
+        manifest,
+        name="first.bin",
+        bundle_id=0x7001,
+        chunk_id=0x8101,
+    )
+    second_file = _make_file_with_single_chunk(
+        manifest,
+        name="second.bin",
+        bundle_id=0x7002,
+        chunk_id=0x8102,
+    )
+
+    jobs = [
+        BundleJob(bundle_id=0x7001, ranges=[ChunkRange(start=0, end=9, tasks=[])]),
+        BundleJob(bundle_id=0x7002, ranges=[ChunkRange(start=10, end=29, tasks=[])]),
+    ]
+
+    async def fake_run_job(self, session, job, file_pool):  # pylint: disable=unused-argument
+        await asyncio.sleep(0.03)
+
+    manifest.downloader.build_bundle_jobs = types.MethodType(
+        lambda self, files: jobs,  # pylint: disable=unused-argument
+        manifest.downloader,
+    )
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(
+        fake_run_job,
+        manifest.downloader,
+    )
+
+    events: list[DownloadProgress] = []
+    results = asyncio.run(
+        manifest.download_files_concurrently(
+            [first_file, second_file],
+            concurrency_limit=1,
+            progress_callback=events.append,
+            progress_interval_seconds=0.01,
+        )
+    )
+
+    assert results == (True, True)
+    assert events[0].phase == "start"
+    assert any(event.phase == "tick" for event in events)
+    assert sum(1 for event in events if event.phase == "bundle_completed") == 2
+
+    final = events[-1]
+    assert final.phase == "completed"
+    assert final.total_jobs == 2
+    assert final.finished_jobs == 2
+    assert final.succeeded_jobs == 2
+    assert final.failed_jobs == 0
+    assert final.total_bytes == 30
+    assert final.finished_bytes == 30
+    assert final.progress == 1.0
+    assert final.average_speed_bytes_per_sec > 0.0
+
+
+def test_download_progress_failed_event_when_bundle_errors(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    first_file = _make_file_with_single_chunk(
+        manifest,
+        name="ok.bin",
+        bundle_id=0x9001,
+        chunk_id=0x9101,
+    )
+    second_file = _make_file_with_single_chunk(
+        manifest,
+        name="bad.bin",
+        bundle_id=0x9002,
+        chunk_id=0x9102,
+    )
+
+    jobs = [
+        BundleJob(bundle_id=0x9001, ranges=[ChunkRange(start=0, end=7, tasks=[])]),
+        BundleJob(bundle_id=0x9002, ranges=[ChunkRange(start=8, end=15, tasks=[])]),
+    ]
+
+    async def fake_run_job(self, session, job, file_pool):  # pylint: disable=unused-argument
+        if job.bundle_id == 0x9002:
+            raise DownloadError("mock failed")
+        await asyncio.sleep(0.01)
+
+    manifest.downloader.build_bundle_jobs = types.MethodType(
+        lambda self, files: jobs,  # pylint: disable=unused-argument
+        manifest.downloader,
+    )
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(
+        fake_run_job,
+        manifest.downloader,
+    )
+
+    events: list[DownloadProgress] = []
+    results = asyncio.run(
+        manifest.download_files_concurrently(
+            [first_file, second_file],
+            concurrency_limit=1,
+            raise_on_error=False,
+            progress_callback=events.append,
+            progress_interval_seconds=0.01,
+        )
+    )
+
+    assert results == (True, False)
+    assert any(event.phase == "bundle_failed" for event in events)
+    assert events[-1].phase == "failed"

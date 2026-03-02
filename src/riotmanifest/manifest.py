@@ -25,7 +25,7 @@ from riotmanifest.core.errors import (
     DecompressError,
     DownloadError,
 )
-from riotmanifest.downloader.scheduler import DownloadScheduler
+from riotmanifest.downloader.scheduler import DownloadScheduler, ProgressCallback
 from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
 
 RETRY_LIMIT = 5
@@ -150,12 +150,30 @@ class PatcherFile:
             return True
         return False
 
-    async def download_file(self, path: StrPath, concurrency_limit: int | None = None) -> bool:
-        """下载单个文件（委托给 Manifest 全局调度器）."""
+    async def download_file(
+        self,
+        path: StrPath,
+        concurrency_limit: int | None = None,
+        progress_callback: ProgressCallback | None = None,
+        progress_interval_seconds: float | None = 1.0,
+    ) -> bool:
+        """下载单个文件（委托给 Manifest 全局调度器）.
+
+        Args:
+            path: 文件输出目录。
+            concurrency_limit: 并发 worker 数，不传时使用 manifest 默认值。
+            progress_callback: 可选下载进度回调。
+            progress_interval_seconds: 时间周期上报间隔（秒）。
+
+        Returns:
+            下载是否成功。
+        """
         self.manifest.path = path
         results = await self.manifest.download_files_concurrently(
             [self],
             concurrency_limit=concurrency_limit,
+            progress_callback=progress_callback,
+            progress_interval_seconds=progress_interval_seconds,
         )
         return bool(results and results[0])
 
@@ -326,9 +344,28 @@ class PatcherManifest:
         files: list[PatcherFile],
         concurrency_limit: int | None = None,
         raise_on_error: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        progress_interval_seconds: float | None = 1.0,
     ) -> tuple[bool, ...]:
-        """并发下载多个文件（下载调度入口）."""
-        return await self.downloader.download_files_concurrently(files, concurrency_limit, raise_on_error)
+        """并发下载多个文件（下载调度入口）.
+
+        Args:
+            files: 需要下载的文件列表。
+            concurrency_limit: 并发 worker 数，不传时使用 manifest 默认值。
+            raise_on_error: 是否在任意 bundle 失败时抛出批量异常。
+            progress_callback: 可选下载进度回调。
+            progress_interval_seconds: 时间周期上报间隔（秒）；<=0 或 None 表示禁用。
+
+        Returns:
+            与输入文件顺序一致的下载结果元组。
+        """
+        return await self.downloader.download_files_concurrently(
+            files,
+            concurrency_limit,
+            raise_on_error,
+            progress_callback,
+            progress_interval_seconds,
+        )
 
     def parse_rman(self, f: BinaryIO):
         """解析 RMAN 头部并进入主体解析流程."""

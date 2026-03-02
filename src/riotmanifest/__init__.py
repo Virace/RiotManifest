@@ -4,6 +4,7 @@ from loguru import logger
 
 from riotmanifest.core.binary_parser import BinaryParser
 from riotmanifest.core.errors import DecompressError, DownloadBatchError, DownloadError
+from riotmanifest.downloader import DownloadProgress
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import RiotGameData
 from riotmanifest.manifest import PatcherBundle, PatcherChunk, PatcherFile, PatcherManifest
@@ -20,6 +21,7 @@ __all__ = [
     "PatcherBundle",
     "PatcherFile",
     "PatcherManifest",
+    "DownloadProgress",
     "WADExtractor",
     "RiotGameData",
     "HttpClientError",
