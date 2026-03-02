@@ -19,18 +19,6 @@ from loguru import logger
 
 from riotmanifest.core.binary_parser import BinaryParser
 from riotmanifest.core.chunk_hash import (
-    HASH_TYPE_BLAKE3 as _HASH_TYPE_BLAKE3,
-)
-from riotmanifest.core.chunk_hash import (
-    HASH_TYPE_HKDF as _HASH_TYPE_HKDF,
-)
-from riotmanifest.core.chunk_hash import (
-    HASH_TYPE_SHA256 as _HASH_TYPE_SHA256,
-)
-from riotmanifest.core.chunk_hash import (
-    HASH_TYPE_SHA512 as _HASH_TYPE_SHA512,
-)
-from riotmanifest.core.chunk_hash import (
     validate_chunk_hash,
 )
 from riotmanifest.core.errors import (
@@ -41,10 +29,6 @@ from riotmanifest.downloader.scheduler import DownloadScheduler
 from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
 
 RETRY_LIMIT = 5
-HASH_TYPE_SHA512 = _HASH_TYPE_SHA512
-HASH_TYPE_SHA256 = _HASH_TYPE_SHA256
-HASH_TYPE_HKDF = _HASH_TYPE_HKDF
-HASH_TYPE_BLAKE3 = _HASH_TYPE_BLAKE3
 
 StrPath = Union[str, "os.PathLike[str]"]
 
@@ -229,8 +213,6 @@ class PatcherManifest:
     DEFAULT_MIN_TRANSFER_SPEED_BYTES = 50 * 1024
     DEFAULT_BASE_TIMEOUT_SECONDS = 30
     DEFAULT_MAX_TIMEOUT_SECONDS = 10 * 60
-    CONTENT_RANGE_REGEX = DownloadScheduler.CONTENT_RANGE_REGEX
-
     def __init__(
         self,
         file: StrPath | None,

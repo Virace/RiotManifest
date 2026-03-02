@@ -9,12 +9,8 @@ from loguru import logger
 
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game.metadata import (
-    GAME_URL_TEMPLATE as _GAME_URL_TEMPLATE,
-)
-from riotmanifest.game.metadata import (
-    LCU_URL as _LCU_URL,
-)
-from riotmanifest.game.metadata import (
+    GAME_URL_TEMPLATE,
+    LCU_URL,
     fetch_game_data,
     fetch_lcu_data,
     version_key,
@@ -27,9 +23,6 @@ StrPath = str | PathLike[str]
 class RiotGameData:
     """整合 LCU/GAME 版本信息并按需构造提取器。."""
 
-    LCU_URL = _LCU_URL
-    GAME_URL_TEMPLATE = _GAME_URL_TEMPLATE
-
     def __init__(self):
         """初始化区域数据缓存."""
         self._lcu_data: dict[str, dict[str, str]] = {}
@@ -37,7 +30,7 @@ class RiotGameData:
 
     def load_lcu_data(self) -> None:
         """加载并解析 LCU 数据。."""
-        self._lcu_data = fetch_lcu_data(url=self.LCU_URL)
+        self._lcu_data = fetch_lcu_data(url=LCU_URL)
 
     def load_game_data(self, regions: list[str] | None = None) -> None:
         """加载并解析 GAME 数据。."""
@@ -47,7 +40,7 @@ class RiotGameData:
         for region in regions:
             self._game_data[region] = fetch_game_data(
                 region=region,
-                url_template=self.GAME_URL_TEMPLATE,
+                url_template=GAME_URL_TEMPLATE,
             )
 
     def latest_lcu(self, region: str = "EUW") -> dict[str, str] | None:
