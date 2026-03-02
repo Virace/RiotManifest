@@ -16,8 +16,8 @@ import aiohttp
 import pyzstd
 from loguru import logger
 
-from riotmanifest.errors import BundleJobFailure, DecompressError, DownloadBatchError, DownloadError
-from riotmanifest.file_pool import FileHandlePool
+from riotmanifest.core.errors import BundleJobFailure, DecompressError, DownloadBatchError, DownloadError
+from riotmanifest.downloader.file_pool import FileHandlePool
 
 
 @dataclass
@@ -56,7 +56,7 @@ class BundleJob:
     ranges: list[ChunkRange] = field(default_factory=list)
 
 
-class ManifestDownloader:
+class DownloadScheduler:
     """Manifest 下载调度器.
 
     该类不直接持有文件与索引数据，而是依赖 `PatcherManifest` 提供
@@ -146,7 +146,7 @@ class ManifestDownloader:
         jobs: list[BundleJob] = []
 
         for bundle_id, tasks in bundle_map.items():
-            ranges = self.manifest._merge_ranges(tasks, self.manifest.gap_tolerance)  # pylint: disable=protected-access
+            ranges = self.merge_ranges(tasks, self.manifest.gap_tolerance)
             if not ranges:
                 continue
             for i in range(0, len(ranges), self.manifest.max_ranges_per_request):
@@ -247,9 +247,14 @@ class ManifestDownloader:
             return []
 
         url = urljoin(self.manifest.bundle_url, f"{bundle_id:016X}.bundle")
-        range_header = self.manifest._build_range_header(ranges)  # pylint: disable=protected-access
+        range_header = self.build_range_header(ranges)
         total_bytes = sum(chunk_range.end - chunk_range.start + 1 for chunk_range in ranges)
-        request_timeout = self.manifest._dynamic_request_timeout(total_bytes)  # pylint: disable=protected-access
+        request_timeout = self.dynamic_request_timeout(
+            total_bytes=total_bytes,
+            base_timeout_seconds=self.manifest.DEFAULT_BASE_TIMEOUT_SECONDS,
+            min_transfer_speed_bytes=self.manifest.DEFAULT_MIN_TRANSFER_SPEED_BYTES,
+            max_timeout_seconds=self.manifest.DEFAULT_MAX_TIMEOUT_SECONDS,
+        )
 
         try:
             headers = {
@@ -263,7 +268,7 @@ class ManifestDownloader:
 
                 if response.status == 200:
                     payload = await response.read()
-                    range_payloads = self.manifest._extract_ranges_from_full_body(  # pylint: disable=protected-access
+                    range_payloads = self.extract_ranges_from_full_body(
                         payload,
                         ranges,
                         bundle_id,
@@ -271,7 +276,7 @@ class ManifestDownloader:
                 else:
                     content_type = response.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").lower()
                     if content_type.startswith("multipart/"):
-                        range_payloads = await self.manifest._parse_multipart_response(  # pylint: disable=protected-access
+                        range_payloads = await self.parse_multipart_response(
                             response,
                             ranges,
                             bundle_id,
@@ -309,7 +314,7 @@ class ManifestDownloader:
         file_pool: FileHandlePool,
     ) -> None:
         """执行单个 bundle 作业：下载、解压、校验并扇出写盘."""
-        range_payloads = await self.manifest._fetch_ranges_data(  # pylint: disable=protected-access
+        range_payloads = await self.fetch_ranges_data(
             session=session,
             bundle_id=job.bundle_id,
             ranges=job.ranges,
@@ -341,7 +346,7 @@ class ManifestDownloader:
                     verify_key = (verify_target.chunk_id, verify_target.hash_type)
                     if verify_key in verified_hash_keys:
                         continue
-                    self.manifest._validate_chunk_hash(  # pylint: disable=protected-access
+                    self.manifest.validate_chunk_hash(
                         chunk_data=data,
                         chunk_id=verify_target.chunk_id,
                         hash_type=verify_target.hash_type,
@@ -354,7 +359,7 @@ class ManifestDownloader:
                             f"解压大小不匹配: chunk_id={chunk.chunk_id}, expected={target.expected_len}, actual={len(data)}"
                         )
 
-                    output = self.manifest._file_output(target.file)  # pylint: disable=protected-access
+                    output = self.manifest.file_output(target.file)
                     await asyncio.to_thread(file_pool.write_at, output, data, target.file_offset)
 
     async def run_bundle_job_with_retry(
@@ -367,7 +372,7 @@ class ManifestDownloader:
         last_error: Exception | None = None
         for attempt in range(self.manifest.max_retries):
             try:
-                await self.manifest._process_bundle_job(  # pylint: disable=protected-access
+                await self.process_bundle_job(
                     session=session,
                     job=job,
                     file_pool=file_pool,
@@ -397,8 +402,8 @@ class ManifestDownloader:
                 results.append(True)
                 continue
 
-            output = self.manifest._file_output(target_file)  # pylint: disable=protected-access
-            if not self.manifest._is_complete_file(target_file, output):  # pylint: disable=protected-access
+            output = self.manifest.file_output(target_file)
+            if not self.manifest.is_complete_file(target_file, output):
                 results.append(False)
                 continue
 
@@ -435,15 +440,15 @@ class ManifestDownloader:
         for file in ordered_files:
             if file.link:
                 continue
-            output = self.manifest._file_output(file)  # pylint: disable=protected-access
-            if not self.manifest._is_complete_file(file, output):  # pylint: disable=protected-access
-                self.manifest._preallocate_file(file)  # pylint: disable=protected-access
+            output = self.manifest.file_output(file)
+            if not self.manifest.is_complete_file(file, output):
+                self.manifest.preallocate_file(file)
                 pending_files.append(file)
 
         if not pending_files:
             return self._build_results(files)
 
-        jobs = self.manifest._build_bundle_jobs(pending_files)  # pylint: disable=protected-access
+        jobs = self.build_bundle_jobs(pending_files)
         if not jobs:
             return self._build_results(files)
 
@@ -473,7 +478,7 @@ class ManifestDownloader:
                     break
 
                 try:
-                    await self.manifest._run_bundle_job_with_retry(  # pylint: disable=protected-access
+                    await self.run_bundle_job_with_retry(
                         session=session,
                         job=job,
                         file_pool=file_pool,

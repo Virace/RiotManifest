@@ -1,7 +1,7 @@
 """Riot manifest 解析与并发下载核心实现.
 
-该模块保留历史公开 API（如 `PatcherManifest`、`PatcherFile`），
-并把下载调度细节拆分到 `manifest_downloader`，降低类体积与认知负担。
+该模块聚焦 manifest 解析与数据模型；
+下载调度由 `riotmanifest.downloader` 子模块负责。
 """
 
 from __future__ import annotations
@@ -14,71 +14,37 @@ from collections.abc import Iterable
 from typing import BinaryIO, Union
 from urllib.parse import urljoin, urlparse
 
-import aiohttp
 import pyzstd
 from loguru import logger
 
-from riotmanifest.binary_parser import BinaryParser
-from riotmanifest.chunk_hash import (
+from riotmanifest.core.binary_parser import BinaryParser
+from riotmanifest.core.chunk_hash import (
     HASH_TYPE_BLAKE3 as _HASH_TYPE_BLAKE3,
 )
-from riotmanifest.chunk_hash import (
+from riotmanifest.core.chunk_hash import (
     HASH_TYPE_HKDF as _HASH_TYPE_HKDF,
 )
-from riotmanifest.chunk_hash import (
+from riotmanifest.core.chunk_hash import (
     HASH_TYPE_SHA256 as _HASH_TYPE_SHA256,
 )
-from riotmanifest.chunk_hash import (
+from riotmanifest.core.chunk_hash import (
     HASH_TYPE_SHA512 as _HASH_TYPE_SHA512,
 )
-from riotmanifest.chunk_hash import (
-    compute_chunk_hash,
-    hkdf_hash,
+from riotmanifest.core.chunk_hash import (
     validate_chunk_hash,
 )
-from riotmanifest.errors import (
-    BundleJobFailure as _BundleJobFailure,
+from riotmanifest.core.errors import (
+    DecompressError,
+    DownloadError,
 )
-from riotmanifest.errors import (
-    DecompressError as _DecompressError,
-)
-from riotmanifest.errors import (
-    DownloadBatchError as _DownloadBatchError,
-)
-from riotmanifest.errors import (
-    DownloadError as _DownloadError,
-)
-from riotmanifest.file_pool import FileHandlePool
-from riotmanifest.http_client import HttpClientError, http_get_bytes
-from riotmanifest.manifest_downloader import (
-    BundleJob as _BundleJob,
-)
-from riotmanifest.manifest_downloader import (
-    ChunkRange as _ChunkRange,
-)
-from riotmanifest.manifest_downloader import (
-    GlobalChunkTask as _GlobalChunkTask,
-)
-from riotmanifest.manifest_downloader import (
-    ManifestDownloader,
-)
-from riotmanifest.manifest_downloader import (
-    WriteTarget as _WriteTarget,
-)
+from riotmanifest.downloader.scheduler import DownloadScheduler
+from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
 
 RETRY_LIMIT = 5
 HASH_TYPE_SHA512 = _HASH_TYPE_SHA512
 HASH_TYPE_SHA256 = _HASH_TYPE_SHA256
 HASH_TYPE_HKDF = _HASH_TYPE_HKDF
 HASH_TYPE_BLAKE3 = _HASH_TYPE_BLAKE3
-DownloadError = _DownloadError
-DecompressError = _DecompressError
-DownloadBatchError = _DownloadBatchError
-BundleJobFailure = _BundleJobFailure
-WriteTarget = _WriteTarget
-GlobalChunkTask = _GlobalChunkTask
-ChunkRange = _ChunkRange
-BundleJob = _BundleJob
 
 StrPath = Union[str, "os.PathLike[str]"]
 
@@ -238,7 +204,7 @@ class PatcherFile:
             raise DecompressError(f"解压缩chunk {chunk.chunk_id}时出错，bundle_id为 {chunk.bundle.bundle_id}") from exc
 
         hash_type = self.chunk_hash_types.get(chunk.chunk_id, 0)
-        self.manifest._validate_chunk_hash(  # pylint: disable=protected-access
+        self.manifest.validate_chunk_hash(
             chunk_data=decompressed_data,
             chunk_id=chunk.chunk_id,
             hash_type=hash_type,
@@ -263,7 +229,7 @@ class PatcherManifest:
     DEFAULT_MIN_TRANSFER_SPEED_BYTES = 50 * 1024
     DEFAULT_BASE_TIMEOUT_SECONDS = 30
     DEFAULT_MAX_TIMEOUT_SECONDS = 10 * 60
-    CONTENT_RANGE_REGEX = ManifestDownloader.CONTENT_RANGE_REGEX
+    CONTENT_RANGE_REGEX = DownloadScheduler.CONTENT_RANGE_REGEX
 
     def __init__(
         self,
@@ -297,7 +263,7 @@ class PatcherManifest:
         self.gap_tolerance = self.DEFAULT_GAP_TOLERANCE
         self.max_ranges_per_request = self.DEFAULT_MAX_RANGES_PER_REQUEST
         self.max_retries = max(1, max_retries)
-        self._downloader: ManifestDownloader | None = ManifestDownloader(self)
+        self.downloader = DownloadScheduler(self)
 
         if not file:
             raise ValueError("file can't be empty")
@@ -314,112 +280,25 @@ class PatcherManifest:
         else:
             raise ValueError("file error")
 
-    def _get_downloader(self) -> ManifestDownloader:
-        """返回下载调度器实例，并兼容测试中绕过 `__init__` 的桩对象."""
-        downloader = getattr(self, "_downloader", None)
-        if downloader is None:
-            downloader = ManifestDownloader(self)
-            self._downloader = downloader
-        return downloader
-
-    def _file_output(self, file: PatcherFile) -> str:
+    def file_output(self, file: PatcherFile) -> str:
         """返回目标文件的绝对输出路径."""
         return os.path.join(self.path, file.name)
 
     @staticmethod
-    def _is_complete_file(file: PatcherFile, output: StrPath) -> bool:
+    def is_complete_file(file: PatcherFile, output: StrPath) -> bool:
         """判断本地文件是否已完整下载（按大小快速判定）."""
         return os.path.isfile(output) and os.path.getsize(output) == file.size
 
-    def _preallocate_file(self, file: PatcherFile):
+    def preallocate_file(self, file: PatcherFile):
         """预分配目标文件，提前占位避免并发写入时多次创建."""
-        output = self._file_output(file)
+        output = self.file_output(file)
         os.makedirs(os.path.dirname(output), exist_ok=True)
         with open(output, "wb") as f:
             f.truncate(file.size)
 
-    def _build_global_task_map(self, files: list[PatcherFile]) -> dict[int, list[GlobalChunkTask]]:
-        """构建 chunk 级任务映射（委托下载调度模块）."""
-        return self._get_downloader().build_global_task_map(files)
-
-    @staticmethod
-    def _merge_ranges(tasks: list[GlobalChunkTask], gap_tolerance: int) -> list[ChunkRange]:
-        """按 gap 容忍度合并 chunk 请求区间."""
-        return ManifestDownloader.merge_ranges(tasks, gap_tolerance)
-
-    def _build_bundle_jobs(self, files: list[PatcherFile]) -> list[BundleJob]:
-        """按 bundle 聚合下载作业列表."""
-        return self._get_downloader().build_bundle_jobs(files)
-
-    @staticmethod
-    def _build_range_header(ranges: list[ChunkRange]) -> str:
-        """构建 HTTP Range 请求头值."""
-        return ManifestDownloader.build_range_header(ranges)
-
-    @classmethod
-    def _dynamic_request_timeout(cls, total_bytes: int) -> aiohttp.ClientTimeout:
-        """按请求数据量计算动态超时参数."""
-        return ManifestDownloader.dynamic_request_timeout(
-            total_bytes=total_bytes,
-            base_timeout_seconds=cls.DEFAULT_BASE_TIMEOUT_SECONDS,
-            min_transfer_speed_bytes=cls.DEFAULT_MIN_TRANSFER_SPEED_BYTES,
-            max_timeout_seconds=cls.DEFAULT_MAX_TIMEOUT_SECONDS,
-        )
-
-    @staticmethod
-    def _hkdf_hash(chunk_data: bytes) -> int:
-        """按 RMAN 规则计算 HKDF 派生哈希（uint64）."""
-        return hkdf_hash(chunk_data)
-
-    @staticmethod
-    def _compute_chunk_hash(chunk_data: bytes, hash_type: int) -> int | None:
-        """按 hash_type 计算 chunk 哈希并返回 uint64."""
-        return compute_chunk_hash(chunk_data, hash_type)
-
-    def _validate_chunk_hash(self, chunk_data: bytes, chunk_id: int, hash_type: int):
+    def validate_chunk_hash(self, chunk_data: bytes, chunk_id: int, hash_type: int) -> None:
         """校验解压后的 chunk 数据哈希是否与 chunk_id 一致."""
         validate_chunk_hash(chunk_data=chunk_data, chunk_id=chunk_id, hash_type=hash_type)
-
-    @staticmethod
-    def _extract_ranges_from_full_body(payload: bytes, ranges: list[ChunkRange], bundle_id: int) -> list[bytes]:
-        """从完整响应体切片出每段 Range 数据."""
-        return ManifestDownloader.extract_ranges_from_full_body(payload, ranges, bundle_id)
-
-    async def _parse_multipart_response(
-        self,
-        response: aiohttp.ClientResponse,
-        ranges: list[ChunkRange],
-        bundle_id: int,
-    ) -> list[bytes]:
-        """解析 multipart/byteranges 响应并映射到请求顺序."""
-        return await self._get_downloader().parse_multipart_response(response, ranges, bundle_id)
-
-    async def _fetch_ranges_data(
-        self,
-        session: aiohttp.ClientSession,
-        bundle_id: int,
-        ranges: list[ChunkRange],
-    ) -> list[bytes]:
-        """请求并返回一个 bundle 的多段压缩数据."""
-        return await self._get_downloader().fetch_ranges_data(session, bundle_id, ranges)
-
-    async def _process_bundle_job(
-        self,
-        session: aiohttp.ClientSession,
-        job: BundleJob,
-        file_pool: FileHandlePool,
-    ) -> None:
-        """执行单个 bundle 作业（下载、解压、校验、写盘）."""
-        await self._get_downloader().process_bundle_job(session, job, file_pool)
-
-    async def _run_bundle_job_with_retry(
-        self,
-        session: aiohttp.ClientSession,
-        job: BundleJob,
-        file_pool: FileHandlePool,
-    ) -> None:
-        """执行 bundle 作业并在失败时重试."""
-        await self._get_downloader().run_bundle_job_with_retry(session, job, file_pool)
 
     def filter_files(self, pattern: str | None = None, flag: str | list[str] | None = None) -> Iterable[PatcherFile]:
         """按文件名正则与 flag 过滤 manifest 文件项.
@@ -467,7 +346,7 @@ class PatcherManifest:
         raise_on_error: bool = True,
     ) -> tuple[bool, ...]:
         """并发下载多个文件（下载调度入口）."""
-        return await self._get_downloader().download_files_concurrently(files, concurrency_limit, raise_on_error)
+        return await self.downloader.download_files_concurrently(files, concurrency_limit, raise_on_error)
 
     def parse_rman(self, f: BinaryIO):
         """解析 RMAN 头部并进入主体解析流程."""

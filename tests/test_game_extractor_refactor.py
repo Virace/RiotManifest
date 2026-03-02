@@ -26,7 +26,7 @@ def _make_manifest_stub() -> PatcherManifest:
         return None
 
     manifest.filter_files = types.MethodType(_filter_files, manifest)
-    manifest._validate_chunk_hash = types.MethodType(_validate_chunk_hash, manifest)
+    manifest.validate_chunk_hash = types.MethodType(_validate_chunk_hash, manifest)
     return manifest
 
 
@@ -175,7 +175,7 @@ def test_load_game_data_for_non_default_region(monkeypatch):
             ]
         }
 
-    monkeypatch.setattr("riotmanifest.game.http_get_json", _fake_http_get_json)
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
     data = RiotGameData()
     data.load_game_data(regions=["KR"])
@@ -194,6 +194,11 @@ def test_build_game_extractor_requires_loaded_region():
 def test_build_game_extractor_uses_latest_url(monkeypatch):
     captured = {}
 
+    class _DummyManifest:
+        def __init__(self, file, path, **kwargs):  # pylint: disable=unused-argument
+            self.file = file
+            self.path = path
+
     class _DummyExtractor:
         def __init__(self, manifest, **kwargs):
             captured["manifest"] = manifest
@@ -208,19 +213,27 @@ def test_build_game_extractor_uses_latest_url(monkeypatch):
             ]
         }
 
-    monkeypatch.setattr("riotmanifest.game.http_get_json", _fake_http_get_json)
-    monkeypatch.setattr("riotmanifest.game.WADExtractor", _DummyExtractor)
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+    monkeypatch.setattr("riotmanifest.game.factory.PatcherManifest", _DummyManifest)
+    monkeypatch.setattr("riotmanifest.game.factory.WADExtractor", _DummyExtractor)
 
     data = RiotGameData()
     data.load_game_data(regions=["KR"])
     extractor = data.build_game_extractor("KR", cache_max_entries=64)
     assert isinstance(extractor, _DummyExtractor)
-    assert captured["manifest"] == "https://example.invalid/kr-1425.manifest"
+    assert isinstance(captured["manifest"], _DummyManifest)
+    assert captured["manifest"].file == "https://example.invalid/kr-1425.manifest"
+    assert captured["manifest"].path == ""
     assert captured["kwargs"]["cache_max_entries"] == 64
 
 
 def test_load_lcu_and_build_extractor(monkeypatch):
     captured = {}
+
+    class _DummyManifest:
+        def __init__(self, file, path, **kwargs):  # pylint: disable=unused-argument
+            self.file = file
+            self.path = path
 
     class _DummyExtractor:
         def __init__(self, manifest, **kwargs):
@@ -245,8 +258,9 @@ def test_load_lcu_and_build_extractor(monkeypatch):
             }
         }
 
-    monkeypatch.setattr("riotmanifest.game.http_get_json", _fake_http_get_json)
-    monkeypatch.setattr("riotmanifest.game.WADExtractor", _DummyExtractor)
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+    monkeypatch.setattr("riotmanifest.game.factory.PatcherManifest", _DummyManifest)
+    monkeypatch.setattr("riotmanifest.game.factory.WADExtractor", _DummyExtractor)
 
     data = RiotGameData()
     data.load_lcu_data()
@@ -256,5 +270,7 @@ def test_load_lcu_and_build_extractor(monkeypatch):
 
     extractor = data.build_lcu_extractor("EUW", cache_max_bytes=1024)
     assert isinstance(extractor, _DummyExtractor)
-    assert captured["manifest"] == "https://example.invalid/lcu-euw.manifest"
+    assert isinstance(captured["manifest"], _DummyManifest)
+    assert captured["manifest"].file == "https://example.invalid/lcu-euw.manifest"
+    assert captured["manifest"].path == ""
     assert captured["kwargs"]["cache_max_bytes"] == 1024

@@ -5,6 +5,7 @@ import pytest
 
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import RiotGameData
+from riotmanifest.game.metadata import first_value, parse_game_release, version_key
 from riotmanifest.manifest import DecompressError, DownloadError, PatcherBundle, PatcherFile, PatcherManifest
 
 
@@ -18,7 +19,7 @@ def _make_manifest_stub() -> PatcherManifest:
     def _validate_chunk_hash(self, chunk_data, chunk_id, hash_type):  # pylint: disable=unused-argument
         return None
 
-    manifest._validate_chunk_hash = types.MethodType(_validate_chunk_hash, manifest)
+    manifest.validate_chunk_hash = types.MethodType(_validate_chunk_hash, manifest)
     return manifest
 
 
@@ -52,29 +53,9 @@ def _raise(exc: Exception):
     raise exc
 
 
-def test_init_with_manifest_string_and_invalid_type(monkeypatch):
-    captured = {}
-
-    class _DummyManifest:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            self.file = kwargs["file"]
-            self.bundle_url = kwargs.get("bundle_url", "")
-            self.files = {}
-
-    monkeypatch.setattr("riotmanifest.extractor.PatcherManifest", _DummyManifest)
-
-    extractor = WADExtractor(
-        "https://example.invalid/test.manifest",
-        bundle_url="https://example.invalid/custom-bundles/",
-        output_dir="/tmp/out",
-    )
-    assert extractor.manifest.file == "https://example.invalid/test.manifest"
-    assert captured["path"] == "/tmp/out"
-    assert captured["bundle_url"] == "https://example.invalid/custom-bundles/"
-
-    with pytest.raises(ValueError, match="只支持"):
-        WADExtractor(123)
+def test_init_requires_manifest_instance():
+    with pytest.raises(TypeError, match="PatcherManifest"):
+        WADExtractor(123)  # type: ignore[arg-type]
 
 
 def test_context_manager_clear_cache_and_close():
@@ -120,7 +101,7 @@ def test_download_chunk_bytes_zero_size_returns_empty(monkeypatch):
     def _unexpected_call(url, headers=None, timeout=None):  # pylint: disable=unused-argument
         raise AssertionError("size=0 不应触发网络请求")
 
-    monkeypatch.setattr("riotmanifest.extractor.http_get_bytes", _unexpected_call)
+    monkeypatch.setattr("riotmanifest.extractor.wad_extractor.http_get_bytes", _unexpected_call)
     assert extractor._download_chunk_bytes(wad_file, chunk) == b""
 
 
@@ -131,7 +112,7 @@ def test_download_chunk_bytes_length_mismatch_raises(monkeypatch):
     extractor = WADExtractor(manifest)
 
     monkeypatch.setattr(
-        "riotmanifest.extractor.http_get_bytes",
+        "riotmanifest.extractor.wad_extractor.http_get_bytes",
         lambda url, headers=None, timeout=None: b"1234",  # pylint: disable=unused-argument
     )
 
@@ -146,7 +127,7 @@ def test_download_chunk_bytes_decompress_error_raises(monkeypatch):
     extractor = WADExtractor(manifest)
 
     monkeypatch.setattr(
-        "riotmanifest.extractor.http_get_bytes",
+        "riotmanifest.extractor.wad_extractor.http_get_bytes",
         lambda url, headers=None, timeout=None: b"ABCD",  # pylint: disable=unused-argument
     )
 
@@ -207,7 +188,7 @@ def test_resolve_hash_fallback_and_find_file_fallback(monkeypatch):
         def get_hash(path: str) -> int:
             return 0x1234 if path == "x.bin" else 0x0
 
-    monkeypatch.setattr("riotmanifest.extractor.WAD", _FallbackWAD)
+    monkeypatch.setattr("riotmanifest.extractor.wad_extractor.WAD", _FallbackWAD)
     assert extractor._resolve_path_hash(object(), "x.bin") == 0x1234
 
     manifest.filter_files = types.MethodType(lambda self, pattern=None, flag=None: [wad_file], manifest)
@@ -308,10 +289,10 @@ def _make_game_release(version: str, url: str, artifact_type: str = "lol-game-cl
 
 
 def test_game_static_helpers_cover_branches():
-    assert RiotGameData._first_value([]) is None
-    assert RiotGameData._first_value("not-list") is None
-    assert RiotGameData._first_value([123]) == "123"
-    assert RiotGameData._version_key("14..A-B") == ((0, 14), (1, "a"), (1, "b"))
+    assert first_value([]) is None
+    assert first_value("not-list") is None
+    assert first_value([123]) == "123"
+    assert version_key("14..A-B") == ((0, 14), (1, "a"), (1, "b"))
 
 
 @pytest.mark.parametrize(
@@ -342,11 +323,11 @@ def test_game_static_helpers_cover_branches():
     ],
 )
 def test_parse_game_release_filters_invalid_inputs(release):
-    assert RiotGameData._parse_game_release(release) is None
+    assert parse_game_release(release) is None
 
 
 def test_load_lcu_data_non_dict_response(monkeypatch):
-    monkeypatch.setattr("riotmanifest.game.http_get_json", lambda url: [])
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: [])
 
     data = RiotGameData()
     data.load_lcu_data()
@@ -380,7 +361,7 @@ def test_load_lcu_data_skips_invalid_configs(monkeypatch):
             }
         }
 
-    monkeypatch.setattr("riotmanifest.game.http_get_json", _fake_http_get_json)
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
     data = RiotGameData()
     data.load_lcu_data()
@@ -401,7 +382,7 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
             "releases": [],
         }
 
-    monkeypatch.setattr("riotmanifest.game.http_get_json", _fake_http_get_json)
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
     data = RiotGameData()
     data.load_game_data(regions=["KR", "EUW1"])

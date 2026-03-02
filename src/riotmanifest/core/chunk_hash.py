@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 
-from riotmanifest.errors import DecompressError
+from riotmanifest.core.errors import DecompressError
 
 try:
     import blake3

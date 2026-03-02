@@ -4,8 +4,8 @@ import pytest
 import pyzstd
 
 from riotmanifest.extractor import WADExtractor
-from riotmanifest.http_client import HttpClientError
 from riotmanifest.manifest import DecompressError, DownloadError, PatcherBundle, PatcherFile, PatcherManifest
+from riotmanifest.utils.http_client import HttpClientError
 
 
 def _make_manifest_stub() -> PatcherManifest:
@@ -18,7 +18,7 @@ def _make_manifest_stub() -> PatcherManifest:
     def _validate_chunk_hash(self, chunk_data, chunk_id, hash_type):  # pylint: disable=unused-argument
         return None
 
-    manifest._validate_chunk_hash = types.MethodType(_validate_chunk_hash, manifest)
+    manifest.validate_chunk_hash = types.MethodType(_validate_chunk_hash, manifest)
     return manifest
 
 
@@ -58,7 +58,7 @@ def test_download_chunk_bytes_success_and_cache(monkeypatch):
         calls["count"] += 1
         return compressed
 
-    monkeypatch.setattr("riotmanifest.extractor.http_get_bytes", _fake_http_get_bytes)
+    monkeypatch.setattr("riotmanifest.extractor.wad_extractor.http_get_bytes", _fake_http_get_bytes)
 
     assert extractor._download_chunk_bytes(wad_file, chunk) == b"HELLO"
     assert extractor._download_chunk_bytes(wad_file, chunk) == b"HELLO"
@@ -74,7 +74,7 @@ def test_download_chunk_bytes_http_error_raises(monkeypatch):
     def _always_fail(url, headers=None, timeout=None):  # pylint: disable=unused-argument
         raise HttpClientError("boom")
 
-    monkeypatch.setattr("riotmanifest.extractor.http_get_bytes", _always_fail)
+    monkeypatch.setattr("riotmanifest.extractor.wad_extractor.http_get_bytes", _always_fail)
     with pytest.raises(DownloadError, match="下载 chunk 失败"):
         extractor._download_chunk_bytes(wad_file, chunk)
 
@@ -86,7 +86,7 @@ def test_download_chunk_bytes_target_size_mismatch(monkeypatch):
     extractor = WADExtractor(manifest)
 
     monkeypatch.setattr(
-        "riotmanifest.extractor.http_get_bytes",
+        "riotmanifest.extractor.wad_extractor.http_get_bytes",
         lambda url, headers=None, timeout=None: compressed,
     )
     with pytest.raises(DecompressError, match="大小不匹配"):
@@ -114,8 +114,8 @@ def test_get_wad_header_two_pass(monkeypatch):
         return b"x" * length
 
     monkeypatch.setattr(WADExtractor, "_read_wad_file_range", _fake_read_range)
-    monkeypatch.setattr("riotmanifest.extractor.WadHeaderAnalyzer", _FakeAnalyzer)
-    monkeypatch.setattr("riotmanifest.extractor.WAD", _FakeWad)
+    monkeypatch.setattr("riotmanifest.extractor.wad_extractor.WadHeaderAnalyzer", _FakeAnalyzer)
+    monkeypatch.setattr("riotmanifest.extractor.wad_extractor.WAD", _FakeWad)
 
     wad = extractor.get_wad_header(_FakeWadFile())
     assert calls == [(0, extractor.V3_HEADER_MINI_SIZE), (0, 300)]

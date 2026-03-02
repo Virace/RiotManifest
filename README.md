@@ -24,6 +24,13 @@ riot提供的manifest文件进行解析下载
 
 默认并发数为 `16`，可通过 `PatcherManifest(..., concurrency_limit=...)` 调整，也可在调用 `download_files_concurrently` 时临时覆盖。
 
+当前主要模块划分：
+- `riotmanifest.core`：解析与错误等核心能力（`binary_parser/chunk_hash/errors`）
+- `riotmanifest.downloader`：下载调度与写盘句柄池（`scheduler/file_pool`）
+- `riotmanifest.extractor`：WAD 按需提取（`wad_extractor`）
+- `riotmanifest.utils`：HTTP 客户端等通用工具
+- `riotmanifest.game`：游戏元数据加载与 Extractor 构造
+
 ### 安装
 ```shell
 pip3 install riotmanifest
@@ -79,9 +86,11 @@ RIOT_PERF_RUN=1 ./scripts/_uv.sh run pytest -q -s tests/test_manifest_download_s
 - WADExtractor
 
 ```python
+from riotmanifest import PatcherManifest
 from riotmanifest.extractor import WADExtractor
 
-we = WADExtractor("DE515F568F4D9C73.manifest")
+manifest = PatcherManifest("DE515F568F4D9C73.manifest", path="")
+we = WADExtractor(manifest)
 data = we.extract_files(
     {
         "DATA/FINAL/Champions/Aatrox.wad.client": [
@@ -125,7 +134,7 @@ rgd = RiotGameData()
 rgd.load_game_data(regions=["EUW1"])
 
 # 不再在 load_game_data 中隐式创建 WADExtractor，改为按需显式构造
-game_extractor = rgd.build_game_extractor("EUW1", cache_max_entries=256)
+game_extractor = rgd.build_game_extractor("EUW1", cache_max_entries=256, manifest_path="")
 ```
 
 

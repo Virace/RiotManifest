@@ -6,8 +6,8 @@ import time
 import pytest
 
 from riotmanifest.game import RiotGameData
-from riotmanifest.http_client import HttpClientError
 from riotmanifest.manifest import PatcherFile, PatcherManifest
+from riotmanifest.utils.http_client import HttpClientError
 
 
 def _env_int(name: str, default: int) -> int:
@@ -187,10 +187,12 @@ def test_game_manifest_overall_download_speed():
         planned_mb = planned_bytes / (1024 * 1024)
         mbps = downloaded_mb / max(elapsed, 1e-9)
 
-        jobs = manifest._build_bundle_jobs(selected)
+        jobs = manifest.downloader.build_bundle_jobs(selected)
         unique_bundles = len({job.bundle_id for job in jobs})
         total_ranges = sum(len(job.ranges) for job in jobs)
-        unique_chunks = sum(len(tasks) for tasks in manifest._build_global_task_map(selected).values())
+        unique_chunks = sum(
+            len(tasks) for tasks in manifest.downloader.build_global_task_map(selected).values()
+        )
 
         print(
                 "\n[PERF] "

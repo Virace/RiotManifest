@@ -3,7 +3,7 @@ import types
 import pytest
 from urllib3 import exceptions as urllib3_exceptions
 
-from riotmanifest.http_client import HttpClient, HttpClientError, HttpResponse, http_get, http_get_bytes, http_get_json
+from riotmanifest.utils.http_client import HttpClient, HttpClientError, HttpResponse, http_get, http_get_bytes, http_get_json
 
 
 def test_http_response_json_success():
@@ -53,7 +53,7 @@ def test_http_helpers_delegate_to_default_client(monkeypatch):
         def get(self, url, headers=None, timeout=None):  # pylint: disable=unused-argument
             return HttpResponse(status=200, data=b'{"value": 7}', headers={})
 
-    monkeypatch.setattr("riotmanifest.http_client._DEFAULT_HTTP_CLIENT", _DummyClient())
+    monkeypatch.setattr("riotmanifest.utils.http_client._DEFAULT_HTTP_CLIENT", _DummyClient())
     assert http_get("https://example.invalid").status == 200
     assert http_get_bytes("https://example.invalid") == b'{"value": 7}'
     assert http_get_json("https://example.invalid") == {"value": 7}

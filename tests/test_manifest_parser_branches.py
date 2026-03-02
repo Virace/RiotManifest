@@ -7,7 +7,8 @@ import aiohttp
 import pytest
 import pyzstd
 
-from riotmanifest.manifest import ChunkRange, DownloadError, PatcherBundle, PatcherManifest
+from riotmanifest.downloader import ChunkRange, DownloadScheduler
+from riotmanifest.manifest import DownloadError, PatcherBundle, PatcherManifest
 
 
 def _make_manifest_stub() -> PatcherManifest:
@@ -23,6 +24,7 @@ def _make_manifest_stub() -> PatcherManifest:
     manifest.chunks = {}
     manifest.flags = {}
     manifest.files = {}
+    manifest.downloader = DownloadScheduler(manifest)
     return manifest
 
 
@@ -268,13 +270,13 @@ def test_parse_multipart_response_maps_by_content_range(monkeypatch):
         def from_response(response):  # pylint: disable=unused-argument
             return _Reader()
 
-    monkeypatch.setattr("riotmanifest.manifest.aiohttp.MultipartReader", _FakeMultipartReader)
+    monkeypatch.setattr("riotmanifest.downloader.scheduler.aiohttp.MultipartReader", _FakeMultipartReader)
 
     ranges = [
         ChunkRange(start=0, end=2, tasks=[]),
         ChunkRange(start=3, end=5, tasks=[]),
     ]
-    result = asyncio.run(manifest._parse_multipart_response(object(), ranges, 0x1))
+    result = asyncio.run(manifest.downloader.parse_multipart_response(object(), ranges, 0x1))
     assert result == [b"ABC", b"DEF"]
 
 
@@ -303,10 +305,10 @@ def test_parse_multipart_response_missing_part_raises(monkeypatch):
         def from_response(response):  # pylint: disable=unused-argument
             return _Reader()
 
-    monkeypatch.setattr("riotmanifest.manifest.aiohttp.MultipartReader", _FakeMultipartReader)
+    monkeypatch.setattr("riotmanifest.downloader.scheduler.aiohttp.MultipartReader", _FakeMultipartReader)
     ranges = [ChunkRange(start=0, end=2, tasks=[]), ChunkRange(start=3, end=5, tasks=[])]
     with pytest.raises(DownloadError, match="multipart段数不足"):
-        asyncio.run(manifest._parse_multipart_response(object(), ranges, 0x1))
+        asyncio.run(manifest.downloader.parse_multipart_response(object(), ranges, 0x1))
 
 
 def test_fetch_ranges_data_status_200(monkeypatch):
@@ -320,8 +322,8 @@ def test_fetch_ranges_data_status_200(monkeypatch):
         assert len(target_ranges) == 1
         return [b"ABC"]
 
-    monkeypatch.setattr(PatcherManifest, "_extract_ranges_from_full_body", staticmethod(_fake_extract))
-    result = asyncio.run(manifest._fetch_ranges_data(session, 0x1234, ranges))
+    monkeypatch.setattr(DownloadScheduler, "extract_ranges_from_full_body", staticmethod(_fake_extract))
+    result = asyncio.run(manifest.downloader.fetch_ranges_data(session, 0x1234, ranges))
     assert result == [b"ABC"]
     assert session.last_request is not None
     assert session.last_request[1]["Range"] == "bytes=0-2"
@@ -333,7 +335,7 @@ def test_fetch_ranges_data_status_206_single_range_plain():
     session = _FakeSession(response)
     ranges = [ChunkRange(start=0, end=2, tasks=[])]
 
-    result = asyncio.run(manifest._fetch_ranges_data(session, 0x1234, ranges))
+    result = asyncio.run(manifest.downloader.fetch_ranges_data(session, 0x1234, ranges))
     assert result == [b"ABC"]
 
 
@@ -347,4 +349,4 @@ def test_fetch_ranges_data_status_206_multi_range_plain_raises():
     ]
 
     with pytest.raises(DownloadError, match="多段range未返回multipart"):
-        asyncio.run(manifest._fetch_ranges_data(session, 0x1234, ranges))
+        asyncio.run(manifest.downloader.fetch_ranges_data(session, 0x1234, ranges))

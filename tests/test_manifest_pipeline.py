@@ -9,20 +9,22 @@ from pathlib import Path
 import pytest
 import pyzstd
 
-from riotmanifest.manifest import (
-    HASH_TYPE_HKDF,
-    HASH_TYPE_SHA256,
+from riotmanifest.core.chunk_hash import HASH_TYPE_HKDF, HASH_TYPE_SHA256, compute_chunk_hash
+from riotmanifest.core.errors import DownloadBatchError
+from riotmanifest.downloader import (
     BundleJob,
     ChunkRange,
-    DecompressError,
-    DownloadBatchError,
-    DownloadError,
+    DownloadScheduler,
     FileHandlePool,
     GlobalChunkTask,
+    WriteTarget,
+)
+from riotmanifest.manifest import (
+    DecompressError,
+    DownloadError,
     PatcherBundle,
     PatcherFile,
     PatcherManifest,
-    WriteTarget,
 )
 
 
@@ -39,6 +41,7 @@ def _make_manifest(path: Path) -> PatcherManifest:
     manifest.chunks = {}
     manifest.flags = {}
     manifest.files = {}
+    manifest.downloader = DownloadScheduler(manifest)
     return manifest
 
 
@@ -57,8 +60,8 @@ def test_compute_chunk_hash_algorithms():
     sha256_expect = int.from_bytes(hashlib.sha256(data).digest()[:8], "little")
     hkdf_expect = _hkdf_reference(data)
 
-    assert PatcherManifest._compute_chunk_hash(data, HASH_TYPE_SHA256) == sha256_expect
-    assert PatcherManifest._compute_chunk_hash(data, HASH_TYPE_HKDF) == hkdf_expect
+    assert compute_chunk_hash(data, HASH_TYPE_SHA256) == sha256_expect
+    assert compute_chunk_hash(data, HASH_TYPE_HKDF) == hkdf_expect
 
 
 def test_build_global_task_map_keeps_hash_type(tmp_path: Path):
@@ -77,7 +80,7 @@ def test_build_global_task_map_keeps_hash_type(tmp_path: Path):
         chunk_hash_types={chunk.chunk_id: HASH_TYPE_SHA256},
     )
 
-    task_map = manifest._build_global_task_map([file])
+    task_map = manifest.downloader.build_global_task_map([file])
     target = task_map[bundle.bundle_id][0].targets[0]
     assert target.chunk_id == chunk.chunk_id
     assert target.hash_type == HASH_TYPE_SHA256
@@ -124,11 +127,11 @@ def test_process_bundle_job_hash_mismatch(tmp_path: Path):
     async def fake_fetch(self, session, bundle_id, ranges):
         return [compressed]
 
-    manifest._fetch_ranges_data = types.MethodType(fake_fetch, manifest)
+    manifest.downloader.fetch_ranges_data = types.MethodType(fake_fetch, manifest.downloader)
     file_pool = FileHandlePool(max_handles=8)
     try:
         with pytest.raises(DecompressError):
-            asyncio.run(manifest._process_bundle_job(None, job, file_pool))
+            asyncio.run(manifest.downloader.process_bundle_job(None, job, file_pool))
     finally:
         file_pool.close()
 
@@ -151,11 +154,14 @@ def test_download_files_concurrently_raise_batch_error(tmp_path: Path):
     async def fake_run_job(self, session, job, file_pool):
         raise DownloadError("mock bundle failure")
 
-    manifest._build_bundle_jobs = types.MethodType(  # type: ignore[method-assign]
+    manifest.downloader.build_bundle_jobs = types.MethodType(  # type: ignore[method-assign]
         lambda self, files: [BundleJob(bundle_id=0x4004, ranges=[ChunkRange(start=0, end=0, tasks=[])])],
-        manifest,
+        manifest.downloader,
     )
-    manifest._run_bundle_job_with_retry = types.MethodType(fake_run_job, manifest)
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(
+        fake_run_job,
+        manifest.downloader,
+    )
 
     with pytest.raises(DownloadBatchError) as exc_info:
         asyncio.run(manifest.download_files_concurrently([file], raise_on_error=True))

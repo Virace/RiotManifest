@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
 from pathlib import Path, PurePosixPath
-from threading import RLock
 from urllib.parse import urljoin
 
 import pyzstd
 from league_tools.formats import WAD, WadHeaderAnalyzer
 from loguru import logger
 
-from riotmanifest.http_client import HttpClientError, http_get_bytes
+from riotmanifest.extractor.cache import ChunkCache
 from riotmanifest.manifest import (
     RETRY_LIMIT,
     DecompressError,
@@ -21,6 +19,7 @@ from riotmanifest.manifest import (
     PatcherFile,
     PatcherManifest,
 )
+from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
 
 
 class WADExtractor:
@@ -30,9 +29,8 @@ class WADExtractor:
 
     def __init__(
         self,
-        manifest: PatcherManifest | str,
+        manifest: PatcherManifest,
         bundle_url: str | None = None,
-        output_dir: str | None = None,
         cache_max_bytes: int = 128 * 1024 * 1024,
         cache_max_entries: int = 512,
         retry_limit: int = RETRY_LIMIT,
@@ -40,41 +38,33 @@ class WADExtractor:
         """初始化 WAD 提取器。.
 
         Args:
-            manifest: manifest 实例，或 manifest 的本地路径/URL。
+            manifest: manifest 实例。
             bundle_url: bundle 基础 URL；为 None 时使用 manifest 内的默认值。
-            output_dir: 输出目录（兼容旧参数，当前仅在构造 manifest 字符串时使用）。
             cache_max_bytes: chunk 解压缓存最大字节数，0 表示禁用缓存。
             cache_max_entries: chunk 解压缓存最大条目数，0 表示禁用缓存。
             retry_limit: 单个 chunk 下载重试次数。
+
+        Raises:
+            TypeError: 传入对象不是 PatcherManifest 时抛出。
         """
+        if not isinstance(manifest, PatcherManifest):
+            raise TypeError("manifest 必须是 PatcherManifest 实例")
+
+        self.manifest = manifest
         self.bundle_url = bundle_url
-        self.output_dir = output_dir
         self.retry_limit = max(1, retry_limit)
-        self.cache_max_bytes = max(0, cache_max_bytes)
-        self.cache_max_entries = max(0, cache_max_entries)
-
-        if isinstance(manifest, PatcherManifest):
-            self.manifest = manifest
-        elif isinstance(manifest, str):
-            manifest_kwargs = {"file": manifest, "path": output_dir or ""}
-            if bundle_url:
-                manifest_kwargs["bundle_url"] = bundle_url
-            self.manifest = PatcherManifest(**manifest_kwargs)
-        else:
-            raise ValueError("manifest 只支持 PatcherManifest 或 str")
-
-        self._cache_lock = RLock()
-        self._chunk_cache: OrderedDict[tuple[int, int], bytes] = OrderedDict()
-        self._cache_bytes = 0
+        self._cache = ChunkCache(
+            max_bytes=cache_max_bytes,
+            max_entries=cache_max_entries,
+        )
 
         logger.debug(
-            "WADExtractor 初始化完成: manifest={}, bundle_url={}, output_dir={}, "
+            "WADExtractor 初始化完成: manifest={}, bundle_url={}, "
             "cache_max_entries={}, cache_max_bytes={}",
             getattr(self.manifest, "file", None),
             self.bundle_url,
-            self.output_dir,
-            self.cache_max_entries,
-            self.cache_max_bytes,
+            self._cache.max_entries,
+            self._cache.max_bytes,
         )
 
     def __enter__(self) -> WADExtractor:
@@ -91,45 +81,17 @@ class WADExtractor:
 
     def clear_cache(self):
         """清空 chunk 解压缓存。."""
-        with self._cache_lock:
-            self._chunk_cache.clear()
-            self._cache_bytes = 0
+        self._cache.clear()
 
     def cache_stats(self) -> dict[str, int]:
         """返回缓存统计信息。."""
-        with self._cache_lock:
-            return {"entries": len(self._chunk_cache), "bytes": self._cache_bytes}
+        return self._cache.stats()
 
     def _cache_get(self, key: tuple[int, int]) -> bytes | None:
-        with self._cache_lock:
-            data = self._chunk_cache.get(key)
-            if data is None:
-                return None
-            self._chunk_cache.move_to_end(key, last=True)
-            return data
+        return self._cache.get(key)
 
     def _cache_put(self, key: tuple[int, int], data: bytes):
-        if self.cache_max_entries == 0 or self.cache_max_bytes == 0:
-            return
-
-        data_size = len(data)
-        if data_size > self.cache_max_bytes:
-            return
-
-        with self._cache_lock:
-            old = self._chunk_cache.pop(key, None)
-            if old is not None:
-                self._cache_bytes -= len(old)
-
-            self._chunk_cache[key] = data
-            self._cache_bytes += data_size
-            self._chunk_cache.move_to_end(key, last=True)
-
-            while self._chunk_cache and (
-                len(self._chunk_cache) > self.cache_max_entries or self._cache_bytes > self.cache_max_bytes
-            ):
-                _, removed = self._chunk_cache.popitem(last=False)
-                self._cache_bytes -= len(removed)
+        self._cache.put(key, data)
 
     def _chunk_cache_key(self, chunk: PatcherChunk) -> tuple[int, int]:
         return chunk.bundle.bundle_id, chunk.chunk_id
@@ -178,7 +140,7 @@ class WADExtractor:
             )
 
         hash_type = wad_file.chunk_hash_types.get(chunk.chunk_id, 0)
-        wad_file.manifest._validate_chunk_hash(  # pylint: disable=protected-access
+        wad_file.manifest.validate_chunk_hash(
             chunk_data=decompressed,
             chunk_id=chunk.chunk_id,
             hash_type=hash_type,

@@ -7,18 +7,16 @@ from pathlib import Path
 import pytest
 import pyzstd
 
-from riotmanifest.http_client import HttpClientError
+from riotmanifest.downloader import BundleJob, ChunkRange, DownloadScheduler, FileHandlePool
 from riotmanifest.manifest import (
     BinaryParser,
-    BundleJob,
-    ChunkRange,
     DecompressError,
     DownloadError,
-    FileHandlePool,
     PatcherBundle,
     PatcherFile,
     PatcherManifest,
 )
+from riotmanifest.utils.http_client import HttpClientError
 
 
 def _make_manifest_stub(path: Path | None = None) -> PatcherManifest:
@@ -34,6 +32,7 @@ def _make_manifest_stub(path: Path | None = None) -> PatcherManifest:
     manifest.chunks = {}
     manifest.flags = {}
     manifest.files = {}
+    manifest.downloader = DownloadScheduler(manifest)
     return manifest
 
 
@@ -126,7 +125,7 @@ def test_patcher_file_download_chunk_retries_then_uses_cache(monkeypatch, tmp_pa
         assert hash_type == 0
 
     monkeypatch.setattr("riotmanifest.manifest.http_get_bytes", _fake_http_get_bytes)
-    manifest._validate_chunk_hash = types.MethodType(_fake_validate, manifest)
+    manifest.validate_chunk_hash = types.MethodType(_fake_validate, manifest)
 
     assert patcher_file.download_chunk(chunk) == raw
     assert patcher_file.download_chunk(chunk) == raw
@@ -278,11 +277,14 @@ def test_download_files_concurrently_handles_non_raising_failures(tmp_path: Path
     async def _fake_run_bundle_job(self, session, job, file_pool):
         raise DownloadError("mock failure")
 
-    manifest._build_bundle_jobs = types.MethodType(
+    manifest.downloader.build_bundle_jobs = types.MethodType(
         lambda self, files: [BundleJob(bundle_id=chunk.bundle.bundle_id, ranges=[ChunkRange(start=0, end=0, tasks=[])])],
-        manifest,
+        manifest.downloader,
     )
-    manifest._run_bundle_job_with_retry = types.MethodType(_fake_run_bundle_job, manifest)
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(
+        _fake_run_bundle_job,
+        manifest.downloader,
+    )
 
     results = asyncio.run(manifest.download_files_concurrently([data_file, link_file], raise_on_error=False))
     assert results == (False, True)

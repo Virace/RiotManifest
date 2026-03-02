@@ -2,19 +2,12 @@
 
 from loguru import logger
 
+from riotmanifest.core.binary_parser import BinaryParser
+from riotmanifest.core.errors import DecompressError, DownloadBatchError, DownloadError
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import RiotGameData
-from riotmanifest.http_client import HttpClientError
-from riotmanifest.manifest import (
-    BinaryParser,
-    DecompressError,
-    DownloadBatchError,
-    DownloadError,
-    PatcherBundle,
-    PatcherChunk,
-    PatcherFile,
-    PatcherManifest,
-)
+from riotmanifest.manifest import PatcherBundle, PatcherChunk, PatcherFile, PatcherManifest
+from riotmanifest.utils.http_client import HttpClientError
 
 logger.disable("riotmanifest")
 
