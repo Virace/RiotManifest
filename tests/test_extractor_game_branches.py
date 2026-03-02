@@ -278,6 +278,20 @@ def test_extract_files_handles_extract_error_and_disk_none(tmp_path: Path, monke
     outputs = extractor.extract_files_to_disk({wad_file.name: ["a/b.bin"]}, output_dir=str(tmp_path))
     assert outputs[wad_file.name]["a/b.bin"] is None
 
+    monkeypatch.setattr(WADExtractor, "get_wad_header", lambda self, file: _ErrorHeader())
+    escaped = extractor.extract_files_to_disk({wad_file.name: ["../escape.bin"]}, output_dir=str(tmp_path))
+    assert escaped[wad_file.name]["../escape.bin"] is None
+
+
+def test_build_disk_output_path_rejects_escape(tmp_path: Path):
+    extractor = WADExtractor(_make_manifest_stub())
+
+    with pytest.raises(ValueError, match="越界路径"):
+        extractor._build_disk_output_path(tmp_path, "A.wad.client", "../../etc/passwd")
+
+    with pytest.raises(ValueError, match="绝对路径"):
+        extractor._build_disk_output_path(tmp_path, "A.wad.client", "/abs/path.bin")
+
 
 def _make_game_release(version: str, url: str, artifact_type: str = "lol-game-client", platforms=None):
     platforms = platforms or ["windows"]

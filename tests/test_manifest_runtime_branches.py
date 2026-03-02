@@ -208,6 +208,21 @@ def test_manifest_init_from_local_file(monkeypatch, tmp_path: Path):
     assert manifest.max_retries == 1
 
 
+def test_manifest_init_accepts_pathlike(monkeypatch, tmp_path: Path):
+    source = tmp_path / "pathlike.manifest"
+    source.write_bytes(b"PATHLIKE")
+    captured = {}
+
+    def _fake_parse_rman(self, file_obj):
+        captured["payload"] = file_obj.read()
+
+    monkeypatch.setattr(PatcherManifest, "parse_rman", _fake_parse_rman)
+    manifest = PatcherManifest(file=source, path=tmp_path)
+
+    assert captured["payload"] == b"PATHLIKE"
+    assert manifest.file == str(source)
+
+
 def test_manifest_init_from_url(monkeypatch, tmp_path: Path):
     captured = {}
 

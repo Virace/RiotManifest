@@ -2,14 +2,10 @@
 
 import asyncio
 import hashlib
-import hmac
 import io
 import os
 import os.path
 import re
-import struct
-import threading
-from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import BinaryIO, Union
@@ -19,93 +15,40 @@ import aiohttp
 import pyzstd
 from loguru import logger
 
+from riotmanifest.binary_parser import BinaryParser
+from riotmanifest.chunk_hash import (
+    HASH_TYPE_BLAKE3 as _HASH_TYPE_BLAKE3,
+)
+from riotmanifest.chunk_hash import (
+    HASH_TYPE_HKDF as _HASH_TYPE_HKDF,
+)
+from riotmanifest.chunk_hash import (
+    HASH_TYPE_SHA256 as _HASH_TYPE_SHA256,
+)
+from riotmanifest.chunk_hash import (
+    HASH_TYPE_SHA512 as _HASH_TYPE_SHA512,
+)
+from riotmanifest.chunk_hash import (
+    compute_chunk_hash,
+    hkdf_hash,
+    validate_chunk_hash,
+)
+from riotmanifest.errors import (
+    BundleJobFailure,
+    DecompressError,
+    DownloadBatchError,
+    DownloadError,
+)
+from riotmanifest.file_pool import FileHandlePool
 from riotmanifest.http_client import HttpClientError, http_get_bytes
 
-try:
-    import blake3
-except ImportError:
-    blake3 = None
-
 RETRY_LIMIT = 5
-HASH_TYPE_SHA512 = 1
-HASH_TYPE_SHA256 = 2
-HASH_TYPE_HKDF = 3
-HASH_TYPE_BLAKE3 = 4
+HASH_TYPE_SHA512 = _HASH_TYPE_SHA512
+HASH_TYPE_SHA256 = _HASH_TYPE_SHA256
+HASH_TYPE_HKDF = _HASH_TYPE_HKDF
+HASH_TYPE_BLAKE3 = _HASH_TYPE_BLAKE3
 
 StrPath = Union[str, "os.PathLike[str]"]
-
-
-class DownloadError(Exception):
-    """下载流程异常."""
-
-    pass
-
-
-class DecompressError(Exception):
-    """解压流程异常."""
-
-    pass
-
-
-@dataclass
-class BundleJobFailure:
-    """单个 bundle 任务失败信息."""
-
-    bundle_id: int
-    error: Exception
-
-
-class DownloadBatchError(DownloadError):
-    """批量下载存在失败任务时抛出的异常。."""
-
-    def __init__(self, failures: list[BundleJobFailure]):
-        """初始化批量下载异常。.
-
-        Args:
-            failures: 失败的 bundle 任务列表。
-        """
-        self.failures = failures
-        summary = ", ".join(f"{failure.bundle_id:016X}:{failure.error}" for failure in failures[:5])
-        if len(failures) > 5:
-            summary = f"{summary}, ... total={len(failures)}"
-        super().__init__(f"存在 {len(failures)} 个 bundle 任务失败: {summary}")
-
-
-class BinaryParser:
-    """Helper class to read from binary file object."""
-
-    def __init__(self, f: BinaryIO):
-        """初始化二进制读取器."""
-        self.f = f
-
-    def tell(self):
-        """返回当前读取偏移."""
-        return self.f.tell()
-
-    def seek(self, position: int):
-        """跳转到绝对偏移."""
-        self.f.seek(position, 0)
-
-    def skip(self, amount: int):
-        """相对向前跳过字节数."""
-        self.f.seek(amount, 1)
-
-    def rewind(self, amount: int):
-        """相对向后回退字节数."""
-        self.f.seek(-amount, 1)
-
-    def unpack(self, fmt: str):
-        """按 struct 格式读取并解包."""
-        length = struct.calcsize(fmt)
-        return struct.unpack(fmt, self.f.read(length))
-
-    def raw(self, length: int):
-        """读取指定长度原始字节."""
-        return self.f.read(length)
-
-    def unpack_string(self):
-        """Unpack string prefixed by its 32-bit length."""
-        return self.f.read(self.unpack("<L")[0]).decode("utf-8")
 
 
 class PatcherChunk:
@@ -195,98 +138,6 @@ class BundleJob:
 
     bundle_id: int
     ranges: list[ChunkRange] = field(default_factory=list)
-
-
-@dataclass
-class _HandleEntry:
-    file_obj: BinaryIO
-    file_lock: threading.Lock
-    refs: int = 0
-    evicted: bool = False
-
-
-class FileHandlePool:
-    """轻量文件句柄池，避免每次写入都重复 open/close。."""
-
-    def __init__(self, max_handles: int = 500):
-        """初始化句柄池.
-
-        Args:
-            max_handles: 池内最多缓存的文件句柄数量。
-        """
-        self.max_handles = max(1, max_handles)
-        self._handles: OrderedDict[str, _HandleEntry] = OrderedDict()
-        self._lock = threading.Lock()
-
-    @staticmethod
-    def _close_entry(entry: _HandleEntry):
-        with entry.file_lock:
-            entry.file_obj.close()
-
-    def _evict_one_locked(self) -> list[_HandleEntry]:
-        if not self._handles:
-            return []
-
-        _, entry = self._handles.popitem(last=False)
-        entry.evicted = True
-        if entry.refs == 0:
-            return [entry]
-        return []
-
-    def _acquire(self, path: StrPath) -> _HandleEntry:
-        norm_path = os.fspath(path)
-        to_close: list[_HandleEntry] = []
-        entry: _HandleEntry | None = None
-        try:
-            with self._lock:
-                if norm_path in self._handles:
-                    entry = self._handles.pop(norm_path)
-                    entry.refs += 1
-                    self._handles[norm_path] = entry
-                    return entry
-
-                while len(self._handles) >= self.max_handles:
-                    to_close.extend(self._evict_one_locked())
-
-                file_obj = io.FileIO(norm_path, mode="r+")
-                entry = _HandleEntry(file_obj=file_obj, file_lock=threading.Lock(), refs=1)
-                self._handles[norm_path] = entry
-                return entry
-        finally:
-            for close_entry in to_close:
-                self._close_entry(close_entry)
-
-    def _release(self, entry: _HandleEntry):
-        should_close = False
-        with self._lock:
-            entry.refs -= 1
-            should_close = entry.refs == 0 and entry.evicted
-        if should_close:
-            self._close_entry(entry)
-
-    def write_at(self, path: StrPath, data: bytes, offset: int):
-        """向目标文件指定偏移写入字节数据."""
-        entry = self._acquire(path)
-        try:
-            with entry.file_lock:
-                entry.file_obj.seek(offset)
-                entry.file_obj.write(data)
-        finally:
-            self._release(entry)
-
-    def close(self):
-        """关闭并清空池内所有句柄."""
-        to_close: list[_HandleEntry] = []
-        with self._lock:
-            handles = list(self._handles.values())
-            self._handles.clear()
-            for entry in handles:
-                entry.evicted = True
-                if entry.refs == 0:
-                    to_close.append(entry)
-
-        for entry in to_close:
-            self._close_entry(entry)
 
 
 class PatcherFile:
@@ -466,7 +317,7 @@ class PatcherManifest:
         Raises:
             ValueError: file 为空或路径无效时抛出。
         """
-        self.file = file
+        self.file = os.fspath(file) if file else file
         self.bundles: Iterable[PatcherBundle] = {}
         self.chunks: dict[int, PatcherChunk] = {}
         self.flags: dict[int, str] = {}
@@ -483,11 +334,13 @@ class PatcherManifest:
         if not file:
             raise ValueError("file can't be empty")
 
-        parsed_url = urlparse(file)
+        file_ref = os.fspath(file)
+        self.file = file_ref
+        parsed_url = urlparse(file_ref)
         if parsed_url.scheme and parsed_url.netloc:
-            self.parse_rman(io.BytesIO(http_get_bytes(file)))
-        elif os.path.isfile(file) and os.path.exists(file):
-            with open(file, "rb") as f:
+            self.parse_rman(io.BytesIO(http_get_bytes(file_ref)))
+        elif os.path.isfile(file_ref):
+            with open(file_ref, "rb") as f:
                 self.parse_rman(f)
         else:
             # 文件错误
@@ -590,43 +443,16 @@ class PatcherManifest:
     @staticmethod
     def _hkdf_hash(chunk_data: bytes) -> int:
         """按 RMAN 规则计算 HKDF 派生哈希（uint64）。."""
-        prk = hashlib.sha256(chunk_data).digest()
-        buffer = hmac.new(prk, b"\x00\x00\x00\x01", hashlib.sha256).digest()
-        result = int.from_bytes(buffer[:8], "little")
-        for _ in range(31):
-            buffer = hmac.new(prk, buffer, hashlib.sha256).digest()
-            result ^= int.from_bytes(buffer[:8], "little")
-        return result
+        return hkdf_hash(chunk_data)
 
     @staticmethod
     def _compute_chunk_hash(chunk_data: bytes, hash_type: int) -> int | None:
         """按 hash_type 计算 chunk 哈希并返回 uint64。."""
-        if hash_type == HASH_TYPE_SHA256:
-            digest = hashlib.sha256(chunk_data).digest()
-            return int.from_bytes(digest[:8], "little")
-        if hash_type == HASH_TYPE_SHA512:
-            digest = hashlib.sha512(chunk_data).digest()
-            return int.from_bytes(digest[:8], "little")
-        if hash_type == HASH_TYPE_HKDF:
-            return PatcherManifest._hkdf_hash(chunk_data)
-        if hash_type == HASH_TYPE_BLAKE3:
-            if blake3 is None:
-                raise DecompressError("缺少 blake3 依赖，无法校验 Blake3 Chunk 哈希")
-            digest = blake3.blake3(chunk_data).digest()
-            return int.from_bytes(digest[:8], "little")
-        if hash_type == 0:
-            return None
-        raise DecompressError(f"不支持的 Chunk 哈希类型: {hash_type}")
+        return compute_chunk_hash(chunk_data, hash_type)
 
     def _validate_chunk_hash(self, chunk_data: bytes, chunk_id: int, hash_type: int):
         """校验解压后的 chunk 数据哈希是否与 chunk_id 一致。."""
-        computed = self._compute_chunk_hash(chunk_data, hash_type)
-        if computed is None:
-            return
-        if computed != chunk_id:
-            raise DecompressError(
-                f"Chunk 哈希校验失败: hash_type={hash_type}, computed={computed:016X}, expected={chunk_id:016X}"
-            )
+        validate_chunk_hash(chunk_data=chunk_data, chunk_id=chunk_id, hash_type=hash_type)
 
     @staticmethod
     def _extract_ranges_from_full_body(payload: bytes, ranges: list[ChunkRange], bundle_id: int) -> list[bytes]:
@@ -991,8 +817,10 @@ class PatcherManifest:
             raise ValueError(f"unsupported RMAN version: {version_major}.{version_minor}")
 
         flags, offset, length, _manifest_id, _body_length = parser.unpack("<HLLQL")
-        assert flags & (1 << 9)  # other flags not handled
-        assert offset == parser.tell()
+        if not flags & (1 << 9):
+            raise ValueError(f"unsupported RMAN flags: {flags:#06x}")
+        if offset != parser.tell():
+            raise ValueError(f"invalid RMAN body offset: expected={parser.tell()}, got={offset}")
 
         f = io.BytesIO(pyzstd.decompress(parser.raw(length)))
         return self.parse_body(f)
@@ -1126,7 +954,7 @@ class PatcherManifest:
             fields['directory_id'],
             fields['file_size'],
             chunk_ids,
-            fields['param_index'] or 0,
+            fields['param_index'],
         )
 
     @classmethod

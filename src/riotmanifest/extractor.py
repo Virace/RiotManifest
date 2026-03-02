@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import RLock
 from urllib.parse import urljoin
 
@@ -254,8 +254,15 @@ class WADExtractor:
         return matches[0]
 
     def _build_disk_output_path(self, output_dir: Path, wad_filename: str, inner_path: str) -> Path:
-        wad_scope = output_dir / Path(wad_filename).name
-        return wad_scope / Path(inner_path)
+        wad_scope = (output_dir / Path(wad_filename).name).resolve()
+        normalized_inner = PurePosixPath(inner_path.replace("\\", "/"))
+        if normalized_inner.is_absolute():
+            raise ValueError(f"不允许绝对路径: {inner_path}")
+
+        output_path = wad_scope.joinpath(*normalized_inner.parts).resolve()
+        if output_path == wad_scope or wad_scope in output_path.parents:
+            return output_path
+        raise ValueError(f"不允许越界路径: {inner_path}")
 
     def _extract_files_impl(
         self,
@@ -311,7 +318,12 @@ class WADExtractor:
                     if data is None:
                         results[wad_filename][target_path] = None
                         continue
-                    output_path = self._build_disk_output_path(output_dir, wad_filename, target_path)
+                    try:
+                        output_path = self._build_disk_output_path(output_dir, wad_filename, target_path)
+                    except ValueError as exc:
+                        logger.error("输出路径非法: {} -> {}, error={}", wad_filename, target_path, exc)
+                        results[wad_filename][target_path] = None
+                        continue
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_bytes(data)
                     results[wad_filename][target_path] = str(output_path)

@@ -95,6 +95,20 @@ def test_parse_rman_invalid_version():
         manifest.parse_rman(io.BytesIO(payload))
 
 
+def test_parse_rman_invalid_flags():
+    manifest = _make_manifest_stub()
+    payload = struct.pack("<4sBB", b"RMAN", 2, 1) + struct.pack("<HLLQL", 0, 28, 0, 0, 0)
+    with pytest.raises(ValueError, match="unsupported RMAN flags"):
+        manifest.parse_rman(io.BytesIO(payload))
+
+
+def test_parse_rman_invalid_offset():
+    manifest = _make_manifest_stub()
+    payload = struct.pack("<4sBB", b"RMAN", 2, 1) + struct.pack("<HLLQL", 1 << 9, 27, 0, 0, 0)
+    with pytest.raises(ValueError, match="invalid RMAN body offset"):
+        manifest.parse_rman(io.BytesIO(payload))
+
+
 def test_parse_body_builds_files_and_hash_types(monkeypatch):
     manifest = _make_manifest_stub()
     bundle = PatcherBundle(0x1001)
@@ -223,7 +237,7 @@ def test_parse_file_entry_with_flags(monkeypatch):
     assert dir_id is None
     assert size == 123
     assert chunk_ids == [0x11, 0x22]
-    assert param_index == 0
+    assert param_index is None
 
 
 def test_parse_multipart_response_maps_by_content_range(monkeypatch):
