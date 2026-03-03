@@ -1,7 +1,7 @@
 [project]
 name = "riotmanifest"
-version = "2.0.0"
-description = "Add your description here"
+version = "2.1.0"
+description = "Riot manifest parsing, concurrent downloader, and manifest/WAD diff toolkit."
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
 ]
