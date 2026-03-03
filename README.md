@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
 完整用法（进度回调、WAD 提取、Manifest/WAD diff、性能基线）请见：
 
-- [docs/API.md](docs/API.md)
+- [docs/API.md](https://github.com/Virace/RiotManifest/blob/main/docs/API.md)
 
 ## 维护者
 

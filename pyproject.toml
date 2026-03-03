@@ -1,6 +1,6 @@
 [project]
 name = "riotmanifest"
-version = "2.1.0"
+version = "2.1.1"
 description = "Riot manifest parsing, concurrent downloader, and manifest/WAD diff toolkit."
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
@@ -14,11 +14,15 @@ dependencies = [
     "league-tools>=1.1.1",
 ]
 readme = "README.md"
-license = "GPL-3.0"
+license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">= 3.10"
-homepage = "https://github.com/Virace/RiotManifest"
-repository = "https://github.com/Virace/RiotManifest"
+
+[project.urls]
+Homepage = "https://github.com/Virace/RiotManifest"
+Repository = "https://github.com/Virace/RiotManifest"
+Documentation = "https://github.com/Virace/RiotManifest/blob/main/docs/API.md"
+Issues = "https://github.com/Virace/RiotManifest/issues"
 
 [build-system]
 requires = ["hatchling"]
