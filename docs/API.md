@@ -207,6 +207,23 @@ wad_report.dump_pretty_json(
   - `section_diffs` 中 `status='unchanged'` 的内部条目
 - `diff_wad_headers` 支持复用 `manifest_report` 的运行时上下文，避免重复初始化两个清单
 
+### BIN 路径回填模式选择（`resolve_wad_diff_paths`）
+
+`resolve_wad_diff_paths` 支持两种 BIN 数据来源：
+
+- `extractor`（默认）：按需提取目标 BIN 所需数据
+- `download_root_wad`：先下载 root WAD 再本地提取 BIN
+
+实践建议：
+
+- 默认使用 `extractor`：适合“目标 BIN 分散、目标 WAD 数量不大”的日常 diff/回填场景
+- 仅在“需要完整落盘、后续离线复用、磁盘空间充足”时考虑 `download_root_wad`
+
+原因说明：
+
+- 稀疏 BIN 场景下，`download_root_wad` 通常会额外引入整包下载与本地 I/O 成本
+- 大体量连续下载（例如全量 `ja_JP + wad.client`）是另一类问题，吞吐可接近满带宽，但不等价于稀疏 BIN 回填场景
+
 ## RiotGameData
 
 ```python
