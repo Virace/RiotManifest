@@ -7,6 +7,7 @@ from riotmanifest.diff.manifest_diff import (
     ManifestMovedEntry,
     diff_manifests,
 )
+from riotmanifest.diff.path_providers import ManifestBinPathProvider, WADPathProvider
 from riotmanifest.diff.wad_header_diff import (
     WADFileDiffEntry,
     WADHeaderDiffReport,
@@ -15,12 +16,17 @@ from riotmanifest.diff.wad_header_diff import (
     WADSectionSignature,
     diff_wad_headers,
 )
+from riotmanifest.diff.wad_path_resolution import (
+    resolve_wad_diff_paths,
+)
 
 __all__ = [
     "ManifestDiffSummary",
     "ManifestDiffEntry",
     "ManifestMovedEntry",
     "ManifestDiffReport",
+    "WADPathProvider",
+    "ManifestBinPathProvider",
     "WADSectionSignature",
     "WADSectionDiffEntry",
     "WADFileDiffEntry",
@@ -28,4 +34,5 @@ __all__ = [
     "WADHeaderDiffReport",
     "diff_manifests",
     "diff_wad_headers",
+    "resolve_wad_diff_paths",
 ]

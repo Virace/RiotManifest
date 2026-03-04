@@ -8,7 +8,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from os import PathLike
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from riotmanifest.diff.wad_header_diff import WADSectionDiffEntry
 
 from riotmanifest.manifest import PatcherFile, PatcherManifest
 
@@ -56,6 +59,7 @@ class ManifestDiffEntry:
     old_chunk_digest: str | None
     new_chunk_digest: str | None
     changed_fields: tuple[str, ...]
+    section_diffs: tuple[WADSectionDiffEntry, ...] | None = None
 
 
 @dataclass(frozen=True)

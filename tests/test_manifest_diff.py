@@ -660,13 +660,28 @@ def test_wad_header_diff_report_json_helpers(monkeypatch, tmp_path):
         include_unchanged=True,
     )
 
+    manifest_changed_entry = report.manifest_report.changed[0]
+    assert manifest_changed_entry.path == wad_path
+    assert manifest_changed_entry.section_diffs is not None
+    assert manifest_changed_entry.section_diffs[0].path_hash == 0x1
+
     payload = report.to_dict()
     assert payload["summary"]["changed_count"] == 1
+    payload_manifest_entry = payload["manifest_report"]["changed"][0]
+    assert payload_manifest_entry["section_diffs"][0]["path_hash"] == 0x1
 
     compact_payload = report.to_dict(collapse_manifest_equal_pairs=True)
     manifest_entry = compact_payload["manifest_report"]["changed"][0]
     assert "old_size" not in manifest_entry
     assert "size" in manifest_entry
+
+    summary_payload = report.to_dict(manifest_report_mode="summary")
+    assert "manifest_report" in summary_payload
+    assert set(summary_payload["manifest_report"]) == {"summary", "moved"}
+
+    without_manifest_payload = report.to_dict(manifest_report_mode="none")
+    assert "manifest_report" not in without_manifest_payload
+    assert without_manifest_payload["summary"]["changed_count"] == 1
 
     text = report.to_pretty_json()
     parsed = json.loads(text)
@@ -678,6 +693,7 @@ def test_wad_header_diff_report_json_helpers(monkeypatch, tmp_path):
     assert out_file.is_file()
     saved_payload = json.loads(out_file.read_text(encoding="utf-8"))
     assert saved_payload["summary"]["changed_count"] == 1
+
 
 
 def test_diff_manifests_handles_hash_type_mismatch_modes():

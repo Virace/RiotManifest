@@ -11,7 +11,7 @@ dependencies = [
     "aiohttp>=3.13.3",
     "urllib3>=2.5.0",
     "blake3>=1.0.8",
-    "league-tools>=1.1.1",
+    "league-tools>=1.1.2",
 ]
 readme = "README.md"
 license = "GPL-3.0-only"

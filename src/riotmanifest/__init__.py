@@ -5,6 +5,7 @@ from loguru import logger
 from riotmanifest.core.binary_parser import BinaryParser
 from riotmanifest.core.errors import DecompressError, DownloadBatchError, DownloadError
 from riotmanifest.diff import (
+    ManifestBinPathProvider,
     ManifestDiffEntry,
     ManifestDiffReport,
     ManifestDiffSummary,
@@ -12,10 +13,12 @@ from riotmanifest.diff import (
     WADFileDiffEntry,
     WADHeaderDiffReport,
     WADHeaderDiffSummary,
+    WADPathProvider,
     WADSectionDiffEntry,
     WADSectionSignature,
     diff_manifests,
     diff_wad_headers,
+    resolve_wad_diff_paths,
 )
 from riotmanifest.downloader import DownloadProgress
 from riotmanifest.extractor import WADExtractor
@@ -42,6 +45,8 @@ __all__ = [
     "ManifestDiffEntry",
     "ManifestMovedEntry",
     "ManifestDiffReport",
+    "WADPathProvider",
+    "ManifestBinPathProvider",
     "WADSectionSignature",
     "WADSectionDiffEntry",
     "WADFileDiffEntry",
@@ -49,4 +54,5 @@ __all__ = [
     "WADHeaderDiffReport",
     "diff_manifests",
     "diff_wad_headers",
+    "resolve_wad_diff_paths",
 ]
