@@ -12,7 +12,7 @@
 - [WADExtractor 按需提取](#wadextractor-按需提取)
 - [Manifest / WAD 差异分析](#manifest--wad-差异分析)
 - [RiotGameData](#riotgamedata)
-- [性能基线（2026-03-02）](#性能基线2026-03-02)
+- [性能基线与基准测试](#性能基线与基准测试)
 
 ## 安装
 
@@ -219,7 +219,7 @@ rgd.load_game_data(regions=["EUW1"])
 extractor = rgd.build_game_extractor("EUW1", cache_max_entries=256, manifest_path="")
 ```
 
-## 性能基线（2026-03-02）
+## 性能基线与基准测试
 
 结果来自仓库内真实网络集成测试（同一日期，不同样本规模）。
 
@@ -251,3 +251,51 @@ RIOT_TRANSPORT_BENCH_RUN=1 RIOT_TRANSPORT_MODE=both ./scripts/_uv.sh run pytest 
 - 吞吐受网络波动影响明显，单次结果会波动
 - 当前下载策略下已可基本跑满带宽
 - `aiohttp` 与 `urllib3` 差距不大，当前样本下 `aiohttp` 略优
+
+### downloader 多轮基准脚本（推荐）
+
+为避免单次测试被网络抖动放大，建议用 `scripts/bench_downloader.py` 跑多轮并取中位数：
+
+```bash
+./scripts/_uv.sh run python scripts/bench_downloader.py \
+  /mnt/c/Users/Virace/Downloads/BA80B75282F55531.manifest \
+  --flag ja_JP \
+  --pattern 'wad.client' \
+  --concurrency 16 \
+  --rounds 3 \
+  --output-json out/downloader_bench_summary.json
+```
+
+可先 dry-run 只看计划：
+
+```bash
+./scripts/_uv.sh run python scripts/bench_downloader.py \
+  /mnt/c/Users/Virace/Downloads/BA80B75282F55531.manifest \
+  --flag ja_JP \
+  --pattern 'wad.client' \
+  --concurrency 16 \
+  --rounds 3 \
+  --dry-run
+```
+
+### 最新实测（2026-03-05）
+
+测试条件：
+
+- 样本：`ja_JP + wad.client`，`files=212`，`planned=3.555GiB`
+- 并发：`16`
+- 轮数：`3`
+- 网络：`1000M` 宽带
+
+结果：
+
+- round1：`120.52MB/s`（`30.205s`）
+- round2：`117.60MB/s`（`30.957s`）
+- round3：`101.36MB/s`（`35.916s`）
+- 中位数：`117.60MB/s`
+
+下载中常见现象（非故障）：
+
+- 单次结果会波动，后半段可能出现阶段性降速
+- 并发开得更高不一定更快；在该样本下，`16` 已经是较稳妥配置
+- 建议优先看多轮中位数，不要只看单次峰值
