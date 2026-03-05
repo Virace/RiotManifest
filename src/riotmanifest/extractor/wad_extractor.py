@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urljoin
@@ -25,6 +26,24 @@ from riotmanifest.manifest import (
 from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
 
 
+@dataclass(frozen=True)
+class _PrefetchChunkTask:
+    """描述一次 chunk 预取任务."""
+
+    wad_file: PatcherFile
+    chunk: PatcherChunk
+
+
+@dataclass(frozen=True)
+class _WADExtractTask:
+    """描述一个待提取的 WAD 任务."""
+
+    wad_filename: str
+    wad_file: PatcherFile
+    wad_header: WAD
+    resolved_targets: list[tuple[str, Any]]
+
+
 class WADExtractor:
     """按需提取 WAD 内部小文件，避免整包下载.
 
@@ -34,7 +53,7 @@ class WADExtractor:
     """
 
     V3_HEADER_MINI_SIZE = 4 + 268 + 4
-    DEFAULT_PREFETCH_CHUNK_CONCURRENCY = 6
+    DEFAULT_PREFETCH_CHUNK_CONCURRENCY = 16
     DEFAULT_RECOMMENDED_MAX_TARGETS_PER_WAD = 120
 
     def __init__(
@@ -247,32 +266,38 @@ class WADExtractor:
                 chunk_index.setdefault(chunk.chunk_id, chunk)
         return list(chunk_index.values())
 
-    def _prefetch_chunks(self, wad_file: PatcherFile, chunks: list[PatcherChunk]) -> None:
-        """并发预取并解压 chunk，填充缓存以加速后续提取。."""
-        if not chunks:
+    def _prefetch_chunk_tasks(self, chunk_tasks: list[_PrefetchChunkTask]) -> None:
+        """并发执行 chunk 预取任务，填充缓存以加速后续提取。."""
+        if not chunk_tasks:
             return
 
-        worker_count = min(self.prefetch_chunk_concurrency, len(chunks))
+        worker_count = min(self.prefetch_chunk_concurrency, len(chunk_tasks))
         if worker_count <= 1:
-            for chunk in chunks:
-                self._download_chunk_bytes(wad_file, chunk)
+            for task in chunk_tasks:
+                self._download_chunk_bytes(task.wad_file, task.chunk)
             return
 
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="wad-prefetch") as executor:
-            future_to_chunk = {
-                executor.submit(self._download_chunk_bytes, wad_file, chunk): chunk for chunk in chunks
+            future_to_task = {
+                executor.submit(self._download_chunk_bytes, task.wad_file, task.chunk): task
+                for task in chunk_tasks
             }
-            for future in as_completed(future_to_chunk):
-                chunk = future_to_chunk[future]
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
                 try:
                     future.result()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "chunk 预取失败，后续将按需重试: chunk_id={:016X}, bundle_id={:016X}, error={}",
-                        chunk.chunk_id,
-                        chunk.bundle.bundle_id,
+                        task.chunk.chunk_id,
+                        task.chunk.bundle.bundle_id,
                         exc,
                     )
+
+    def _prefetch_chunks(self, wad_file: PatcherFile, chunks: list[PatcherChunk]) -> None:
+        """并发预取并解压单个 WAD 所需 chunk。."""
+        chunk_tasks = [_PrefetchChunkTask(wad_file=wad_file, chunk=chunk) for chunk in chunks]
+        self._prefetch_chunk_tasks(chunk_tasks)
 
     def _prepare_prefetch(self, wad_file: PatcherFile, sections: list[Any]) -> None:
         """在批量小文件提取前预热 chunk 缓存。."""
@@ -297,6 +322,58 @@ class WADExtractor:
         )
         self._prefetch_chunks(wad_file, needed_chunks)
 
+    def _collect_global_prefetch_tasks(self, tasks: list[_WADExtractTask]) -> list[_PrefetchChunkTask]:
+        """汇总多个 WAD 的预取任务，按 chunk 做全局去重。."""
+        task_index: dict[tuple[int, int], _PrefetchChunkTask] = {}
+
+        for task in tasks:
+            sections = [section for _, section in task.resolved_targets]
+            if len(sections) <= 1:
+                continue
+            if len(sections) > self.recommended_max_targets_per_wad:
+                logger.warning(
+                    "单个 WAD 目标文件过多({})，当前按需提取方式不建议用于大批量文件；"
+                    "建议先下载完整 WAD 再本地提取。此次将跳过并发预取: {}",
+                    len(sections),
+                    task.wad_filename,
+                )
+                continue
+
+            try:
+                needed_chunks = self._collect_unique_chunks_for_sections(task.wad_file, sections)
+            except ValueError as exc:
+                logger.warning(
+                    "构建 WAD 预取任务失败，跳过该 WAD 的全局预取: {}, error={}",
+                    task.wad_filename,
+                    exc,
+                )
+                continue
+
+            for chunk in needed_chunks:
+                cache_key = self._chunk_cache_key(chunk)
+                task_index.setdefault(
+                    cache_key,
+                    _PrefetchChunkTask(
+                        wad_file=task.wad_file,
+                        chunk=chunk,
+                    ),
+                )
+        return list(task_index.values())
+
+    def _prepare_global_prefetch(self, tasks: list[_WADExtractTask]) -> None:
+        """在提取前构建跨 WAD 全局 chunk 池并并发预热缓存。."""
+        prefetch_tasks = self._collect_global_prefetch_tasks(tasks)
+        if not prefetch_tasks:
+            return
+
+        logger.debug(
+            "开始全局预取 WAD chunk: wads={}, unique_chunks={}, concurrency={}",
+            len(tasks),
+            len(prefetch_tasks),
+            self.prefetch_chunk_concurrency,
+        )
+        self._prefetch_chunk_tasks(prefetch_tasks)
+
     def _find_wad_file(self, wad_filename: str) -> PatcherFile | None:
         target = wad_filename.lower()
         for file in self.manifest.files.values():
@@ -320,13 +397,13 @@ class WADExtractor:
             return output_path
         raise ValueError(f"不允许越界路径: {inner_path}")
 
-    def _extract_files_impl(
+    def _resolve_wad_extract_tasks(
         self,
         wad_file_paths: dict[str, list[str]],
-        output_dir: Path | None,
-    ) -> dict[str, dict[str, bytes | str | None]]:
-        results: dict[str, dict[str, bytes | str | None]] = {}
-        logger.info("开始提取 WAD 文件内容")
+        results: dict[str, dict[str, bytes | str | None]],
+    ) -> list[_WADExtractTask]:
+        """解析 WAD 头与目标 section，构建后续提取任务列表。."""
+        tasks: list[_WADExtractTask] = []
 
         for wad_filename, target_paths in wad_file_paths.items():
             results[wad_filename] = {}
@@ -348,7 +425,6 @@ class WADExtractor:
 
             section_map = {section.path_hash: section for section in wad_header.files}
             resolved_targets: list[tuple[str, Any]] = []
-
             for target_path in target_paths:
                 path_hash = self._resolve_path_hash(wad_header, target_path)
                 section = section_map.get(path_hash)
@@ -358,42 +434,71 @@ class WADExtractor:
                     continue
                 resolved_targets.append((target_path, section))
 
-            try:
-                self._prepare_prefetch(
+            tasks.append(
+                _WADExtractTask(
+                    wad_filename=wad_filename,
                     wad_file=wad_file,
-                    sections=[section for _, section in resolved_targets],
+                    wad_header=wad_header,
+                    resolved_targets=resolved_targets,
                 )
+            )
+        return tasks
+
+    def _extract_wad_targets(
+        self,
+        task: _WADExtractTask,
+        output_dir: Path | None,
+        results: dict[str, dict[str, bytes | str | None]],
+    ) -> None:
+        """执行单个 WAD 任务并写回提取结果。."""
+        for target_path, section in task.resolved_targets:
+            try:
+                compressed_data = self._read_wad_file_range(
+                    wad_file=task.wad_file,
+                    start=section.offset,
+                    length=section.compressed_size,
+                )
+                data = task.wad_header.extract_by_section(section, "", raw=True, data=compressed_data)
             except (DownloadError, DecompressError, ValueError) as exc:
-                logger.warning("WAD 预取阶段失败，回退到按需提取: {}, error={}", wad_filename, exc)
+                logger.error("提取失败: {} -> {}, error={}", task.wad_filename, target_path, exc)
+                results[task.wad_filename][target_path] = None
+                continue
 
-            for target_path, section in resolved_targets:
-                try:
-                    compressed_data = self._read_wad_file_range(
-                        wad_file=wad_file,
-                        start=section.offset,
-                        length=section.compressed_size,
-                    )
-                    data = wad_header.extract_by_section(section, "", raw=True, data=compressed_data)
-                except (DownloadError, DecompressError, ValueError) as exc:
-                    logger.error("提取失败: {} -> {}, error={}", wad_filename, target_path, exc)
-                    results[wad_filename][target_path] = None
-                    continue
+            if output_dir is None:
+                results[task.wad_filename][target_path] = data
+                continue
+            if data is None:
+                results[task.wad_filename][target_path] = None
+                continue
 
-                if output_dir is None:
-                    results[wad_filename][target_path] = data
-                else:
-                    if data is None:
-                        results[wad_filename][target_path] = None
-                        continue
-                    try:
-                        output_path = self._build_disk_output_path(output_dir, wad_filename, target_path)
-                    except ValueError as exc:
-                        logger.error("输出路径非法: {} -> {}, error={}", wad_filename, target_path, exc)
-                        results[wad_filename][target_path] = None
-                        continue
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    output_path.write_bytes(data)
-                    results[wad_filename][target_path] = str(output_path)
+            try:
+                output_path = self._build_disk_output_path(output_dir, task.wad_filename, target_path)
+            except ValueError as exc:
+                logger.error("输出路径非法: {} -> {}, error={}", task.wad_filename, target_path, exc)
+                results[task.wad_filename][target_path] = None
+                continue
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(data)
+            results[task.wad_filename][target_path] = str(output_path)
+
+    def _extract_files_impl(
+        self,
+        wad_file_paths: dict[str, list[str]],
+        output_dir: Path | None,
+    ) -> dict[str, dict[str, bytes | str | None]]:
+        results: dict[str, dict[str, bytes | str | None]] = {}
+        logger.info("开始提取 WAD 文件内容")
+
+        tasks = self._resolve_wad_extract_tasks(wad_file_paths, results)
+        self._prepare_global_prefetch(tasks)
+
+        for task in tasks:
+            self._extract_wad_targets(
+                task=task,
+                output_dir=output_dir,
+                results=results,
+            )
 
         logger.info("完成 WAD 文件提取")
         return results
