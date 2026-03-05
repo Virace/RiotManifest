@@ -1,6 +1,6 @@
 [project]
 name = "riotmanifest"
-version = "2.1.1"
+version = "2.2.0"
 description = "Riot manifest parsing, concurrent downloader, and manifest/WAD diff toolkit."
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
@@ -64,6 +64,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = [
     "integration: 真实网络集成测试（含压力测试）",
 ]
