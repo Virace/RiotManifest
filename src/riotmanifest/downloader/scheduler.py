@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -77,6 +78,7 @@ class BundleJob:
 
     bundle_id: int
     ranges: list[ChunkRange] = field(default_factory=list)
+    total_bytes: int = 0
 
 
 class DownloadScheduler:
@@ -173,13 +175,26 @@ class DownloadScheduler:
             if not ranges:
                 continue
             for i in range(0, len(ranges), self.manifest.max_ranges_per_request):
-                jobs.append(BundleJob(bundle_id=bundle_id, ranges=ranges[i : i + self.manifest.max_ranges_per_request]))
+                job_ranges = ranges[i : i + self.manifest.max_ranges_per_request]
+                total_bytes = sum(chunk_range.end - chunk_range.start + 1 for chunk_range in job_ranges)
+                jobs.append(
+                    BundleJob(
+                        bundle_id=bundle_id,
+                        ranges=job_ranges,
+                        total_bytes=total_bytes,
+                    )
+                )
+
+        # 先执行大作业可显著降低 worker 队列尾部“少量超大包”导致的长尾。
+        jobs.sort(key=lambda job: (-job.total_bytes, job.bundle_id))
 
         return jobs
 
     @staticmethod
     def job_total_bytes(job: BundleJob) -> int:
         """计算单个 bundle 作业覆盖的总字节数（压缩数据）。."""
+        if job.total_bytes > 0:
+            return job.total_bytes
         return sum(chunk_range.end - chunk_range.start + 1 for chunk_range in job.ranges)
 
     @staticmethod
@@ -212,13 +227,21 @@ class DownloadScheduler:
         base_timeout_seconds: int,
         min_transfer_speed_bytes: int,
         max_timeout_seconds: int,
+        sock_read_timeout_seconds: int,
     ) -> aiohttp.ClientTimeout:
         """按请求体积估算超时，避免大包固定超时误判."""
-        size_factor = total_bytes / float(min_transfer_speed_bytes)
-        timeout_seconds = base_timeout_seconds + int(size_factor)
+        safe_min_transfer_speed = max(1, min_transfer_speed_bytes)
+        size_factor = total_bytes / float(safe_min_transfer_speed)
+        timeout_seconds = base_timeout_seconds + math.ceil(size_factor)
         timeout_seconds = min(timeout_seconds, max_timeout_seconds)
         timeout_seconds = max(timeout_seconds, base_timeout_seconds)
-        return aiohttp.ClientTimeout(total=timeout_seconds, sock_connect=30, sock_read=None)
+        # 限制单次读阻塞时间，避免个别连接长时间“半死不活”拖慢全局收尾。
+        sock_read_timeout = min(max(1, sock_read_timeout_seconds), timeout_seconds)
+        return aiohttp.ClientTimeout(
+            total=timeout_seconds,
+            sock_connect=30,
+            sock_read=sock_read_timeout,
+        )
 
     @staticmethod
     def extract_ranges_from_full_body(payload: bytes, ranges: list[ChunkRange], bundle_id: int) -> list[bytes]:
@@ -300,6 +323,7 @@ class DownloadScheduler:
             base_timeout_seconds=self.manifest.DEFAULT_BASE_TIMEOUT_SECONDS,
             min_transfer_speed_bytes=self.manifest.DEFAULT_MIN_TRANSFER_SPEED_BYTES,
             max_timeout_seconds=self.manifest.DEFAULT_MAX_TIMEOUT_SECONDS,
+            sock_read_timeout_seconds=self.manifest.DEFAULT_SOCK_READ_TIMEOUT_SECONDS,
         )
 
         try:

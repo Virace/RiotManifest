@@ -2,7 +2,7 @@
 
 ![](https://img.shields.io/badge/python-%3E%3D3.10-blue)
 
-本文档包含完整接口用法、进度回调、WAD 按需提取、Manifest/WAD 差异分析与性能基线。
+本文档包含完整接口用法、进度回调、WAD 按需提取与 Manifest/WAD 差异分析。
 
 ## 目录
 
@@ -12,7 +12,7 @@
 - [WADExtractor 按需提取](#wadextractor-按需提取)
 - [Manifest / WAD 差异分析](#manifest--wad-差异分析)
 - [RiotGameData](#riotgamedata)
-- [性能基线（2026-03-02）](#性能基线2026-03-02)
+- [测试与基准文档](#测试与基准文档)
 
 ## 安装
 
@@ -207,6 +207,60 @@ wad_report.dump_pretty_json(
   - `section_diffs` 中 `status='unchanged'` 的内部条目
 - `diff_wad_headers` 支持复用 `manifest_report` 的运行时上下文，避免重复初始化两个清单
 
+### BIN 路径回填模式选择（`resolve_wad_diff_paths`）
+
+`resolve_wad_diff_paths` 支持两种 BIN 数据来源：
+
+- `extractor`（默认）：按需提取目标 BIN 所需数据
+- `download_root_wad`：先下载 root WAD 再本地提取 BIN
+
+#### 简单调用（默认 `extractor`）
+
+```python
+from riotmanifest import (
+    ManifestBinPathProvider,
+    diff_manifests,
+    diff_wad_headers,
+    resolve_wad_diff_paths,
+)
+
+manifest_report = diff_manifests(
+    old_manifest,
+    new_manifest,
+    flags="zh_CN",
+    target_files=["DATA/FINAL/Champions/Akshan.zh_CN.wad.client"],
+    include_unchanged=False,
+    detect_moves=False,
+)
+wad_report = diff_wad_headers(
+    manifest_report=manifest_report,
+    target_wad_files=["DATA/FINAL/Champions/Akshan.zh_CN.wad.client"],
+    include_unchanged=False,
+)
+
+with ManifestBinPathProvider(max_skin_id=100) as provider:
+    resolved_report = resolve_wad_diff_paths(
+        wad_report,
+        path_provider=provider,
+        bin_data_source_mode="extractor",
+    )
+
+resolved_report.manifest_report.dump_pretty_json(
+    "out/manifest_diff_with_section_paths.json",
+    collapse_equal_pairs=True,
+)
+```
+
+实践建议：
+
+- 默认使用 `extractor`：适合“目标 BIN 分散、目标 WAD 数量不大”的日常 diff/回填场景
+- 仅在“需要完整落盘、后续离线复用、磁盘空间充足”时考虑 `download_root_wad`
+
+原因说明：
+
+- 稀疏 BIN 场景下，`download_root_wad` 通常会额外引入整包下载与本地 I/O 成本
+- 大体量连续下载（例如全量 `ja_JP + wad.client`）是另一类问题，吞吐可接近满带宽，但不等价于稀疏 BIN 回填场景
+
 ## RiotGameData
 
 ```python
@@ -219,35 +273,6 @@ rgd.load_game_data(regions=["EUW1"])
 extractor = rgd.build_game_extractor("EUW1", cache_max_entries=256, manifest_path="")
 ```
 
-## 性能基线（2026-03-02）
+## 测试与基准文档
 
-结果来自仓库内真实网络集成测试（同一日期，不同样本规模）。
-
-常规压力样本：
-
-```bash
-RIOT_PERF_RUN=1 ./scripts/_uv.sh run pytest -q -s tests/test_manifest_download_speed.py
-```
-
-- manifest：`https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest`
-- 样本：`files=92`，`planned=515.14MB`
-- 吞吐：`63.61MB/s`（`elapsed=8.098s`）
-- 调度：`jobs=126`，`ranges=142`，`unique_chunks=1410`
-
-全量中文 `wad.client` 传输层对比：
-
-```bash
-RIOT_TRANSPORT_BENCH_RUN=1 RIOT_TRANSPORT_MODE=both ./scripts/_uv.sh run pytest -q -s tests/test_downloader_transport_compare.py
-```
-
-- manifest：`https://lol.secure.dyn.riotcdn.net/channels/public/releases/BA80B75282F55531.manifest`
-- 样本：`files=212`，`planned=3605.73MB`
-- `aiohttp`：`117.51MB/s`（`elapsed=30.685s`）
-- `urllib3`：`113.00MB/s`（`elapsed=31.910s`）
-- 速度比：`urllib3 / aiohttp = 0.962`
-
-结论：
-
-- 吞吐受网络波动影响明显，单次结果会波动
-- 当前下载策略下已可基本跑满带宽
-- `aiohttp` 与 `urllib3` 差距不大，当前样本下 `aiohttp` 略优
+测试脚本说明与基准命令已移至独立文档：`docs/TESTING.md`。

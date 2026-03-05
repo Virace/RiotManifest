@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from os import PathLike
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +12,7 @@ from typing import Any, Literal
 from riotmanifest.diff.manifest_diff import (
     DEFAULT_OVERLAP_WARNING_THRESHOLD,
     HashTypeMismatchMode,
+    ManifestDiffEntry,
     ManifestDiffReport,
     ManifestDiffStatus,
     ManifestInput,
@@ -27,6 +28,7 @@ from riotmanifest.extractor.wad_extractor import WADExtractor
 from riotmanifest.manifest import PatcherFile, PatcherManifest
 
 WADDiffStatus = Literal["added", "removed", "changed", "unchanged", "error"]
+ManifestReportRenderMode = Literal["full", "summary", "none"]
 WAD_FILE_PATTERN = r"\.wad\.client$"
 
 
@@ -85,6 +87,7 @@ class WADSectionDiffEntry:
     status: ManifestDiffStatus
     old_sections: tuple[WADSectionSignature, ...]
     new_sections: tuple[WADSectionSignature, ...]
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,20 +122,40 @@ class WADHeaderDiffReport:
     files: tuple[WADFileDiffEntry, ...]
     manifest_report: ManifestDiffReport
 
-    def to_dict(self, *, collapse_manifest_equal_pairs: bool = False) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        collapse_manifest_equal_pairs: bool = False,
+        manifest_report_mode: ManifestReportRenderMode = "full",
+    ) -> dict[str, Any]:
         """序列化为可 JSON 化的字典结构。.
 
         Args:
             collapse_manifest_equal_pairs: 是否压缩内嵌 manifest_report 中
                 `old_*` 与 `new_*` 相同的字段。
+            manifest_report_mode: 内嵌 manifest_report 的渲染模式：
+                - `full`: 原样保留完整 manifest_report（默认）
+                - `summary`: 仅保留 manifest_report 的 `summary` 与 `moved`
+                - `none`: 不输出 manifest_report
         """
+        mode = _normalize_manifest_report_mode(manifest_report_mode)
         payload = asdict(self)
-        if not collapse_manifest_equal_pairs:
-            return payload
-
         manifest_report_payload = payload.get("manifest_report")
-        if isinstance(manifest_report_payload, dict):
+        if isinstance(manifest_report_payload, dict) and collapse_manifest_equal_pairs:
             _collapse_equal_manifest_fields(manifest_report_payload)
+
+        if mode == "full":
+            return payload
+        if mode == "summary":
+            if isinstance(manifest_report_payload, dict):
+                payload["manifest_report"] = {
+                    "summary": manifest_report_payload.get("summary"),
+                    "moved": manifest_report_payload.get("moved", tuple()),
+                }
+            return payload
+        if mode == "none":
+            payload.pop("manifest_report", None)
+            return payload
         return payload
 
     def to_pretty_json(
@@ -141,6 +164,7 @@ class WADHeaderDiffReport:
         indent: int = 2,
         ensure_ascii: bool = False,
         collapse_manifest_equal_pairs: bool = False,
+        manifest_report_mode: ManifestReportRenderMode = "full",
     ) -> str:
         """返回美化后的 JSON 文本。.
 
@@ -149,12 +173,16 @@ class WADHeaderDiffReport:
             ensure_ascii: 是否仅输出 ASCII 字符。
             collapse_manifest_equal_pairs: 是否压缩内嵌 manifest_report 中
                 `old_*` 与 `new_*` 相同字段。
+            manifest_report_mode: manifest_report 输出模式；语义同 `to_dict`。
 
         Returns:
             JSON 字符串。
         """
         return json.dumps(
-            self.to_dict(collapse_manifest_equal_pairs=collapse_manifest_equal_pairs),
+            self.to_dict(
+                collapse_manifest_equal_pairs=collapse_manifest_equal_pairs,
+                manifest_report_mode=manifest_report_mode,
+            ),
             ensure_ascii=ensure_ascii,
             indent=indent,
             sort_keys=False,
@@ -167,6 +195,7 @@ class WADHeaderDiffReport:
         indent: int = 2,
         ensure_ascii: bool = False,
         collapse_manifest_equal_pairs: bool = False,
+        manifest_report_mode: ManifestReportRenderMode = "full",
     ) -> str:
         """将报告写入本地 JSON 文件并返回写入路径。.
 
@@ -176,6 +205,7 @@ class WADHeaderDiffReport:
             ensure_ascii: 是否仅输出 ASCII 字符。
             collapse_manifest_equal_pairs: 是否压缩内嵌 manifest_report 中
                 `old_*` 与 `new_*` 相同字段。
+            manifest_report_mode: manifest_report 输出模式；语义同 `to_dict`。
 
         Returns:
             标准化后的输出路径字符串。
@@ -187,6 +217,7 @@ class WADHeaderDiffReport:
                 indent=indent,
                 ensure_ascii=ensure_ascii,
                 collapse_manifest_equal_pairs=collapse_manifest_equal_pairs,
+                manifest_report_mode=manifest_report_mode,
             ),
             encoding="utf-8",
         )
@@ -244,9 +275,7 @@ def diff_wad_headers(
     requested_targets = _normalize_target_files(target_wad_files)
     if not requested_targets:
         raise ValueError("diff_wad_headers 必须显式提供 target_wad_files，建议先筛选后再执行 WAD 头部对比。")
-    requested_wad_targets = {
-        lowered: raw for lowered, raw in requested_targets.items() if lowered.endswith(".wad.client")
-    }
+    requested_wad_targets = {lowered: raw for lowered, raw in requested_targets.items() if lowered.endswith(".wad.client")}
     if not requested_wad_targets:
         raise ValueError("target_wad_files 中没有有效的 .wad.client 路径。")
 
@@ -332,9 +361,7 @@ def diff_wad_headers(
             )
             has_section_change = any(item.status != "unchanged" for item in section_diffs)
             visible_section_diffs = (
-                section_diffs
-                if include_unchanged
-                else tuple(item for item in section_diffs if item.status != "unchanged")
+                section_diffs if include_unchanged else tuple(item for item in section_diffs if item.status != "unchanged")
             )
             wad_status: WADDiffStatus = "changed" if has_section_change else "unchanged"
             if status == "changed":
@@ -362,10 +389,15 @@ def diff_wad_headers(
         error_count=status_counts["error"],
         warnings=tuple(warnings),
     )
+    sorted_files = tuple(sorted(file_results, key=lambda item: item.wad_path))
+    enriched_manifest_report = attach_wad_sections_to_manifest_report(
+        manifest_report=report,
+        wad_files=sorted_files,
+    )
     return WADHeaderDiffReport(
         summary=summary,
-        files=tuple(sorted(file_results, key=lambda item: item.wad_path)),
-        manifest_report=report,
+        files=sorted_files,
+        manifest_report=enriched_manifest_report,
     )
 
 
@@ -549,3 +581,77 @@ def _as_optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def attach_wad_sections_to_manifest_report(
+    *,
+    manifest_report: ManifestDiffReport,
+    wad_files: Sequence[WADFileDiffEntry],
+) -> ManifestDiffReport:
+    """将 WAD section_diffs 附加到对应的 ManifestDiffEntry."""
+    wad_index = {item.wad_path.lower(): item for item in wad_files}
+    if not wad_index:
+        return manifest_report
+
+    added_entries, added_changed = _attach_entries_with_wad_sections(manifest_report.added, wad_index)
+    removed_entries, removed_changed = _attach_entries_with_wad_sections(manifest_report.removed, wad_index)
+    changed_entries, changed_changed = _attach_entries_with_wad_sections(manifest_report.changed, wad_index)
+    unchanged_entries, unchanged_changed = _attach_entries_with_wad_sections(manifest_report.unchanged, wad_index)
+
+    if not any((added_changed, removed_changed, changed_changed, unchanged_changed)):
+        return manifest_report
+
+    updated_report = replace(
+        manifest_report,
+        added=added_entries,
+        removed=removed_entries,
+        changed=changed_entries,
+        unchanged=unchanged_entries,
+    )
+    _copy_manifest_runtime_context(source=manifest_report, target=updated_report)
+    return updated_report
+
+
+def _attach_entries_with_wad_sections(
+    entries: Sequence[ManifestDiffEntry],
+    wad_index: Mapping[str, WADFileDiffEntry],
+) -> tuple[tuple[ManifestDiffEntry, ...], bool]:
+    """将单组 Manifest 条目与 wad section_diffs 做路径级关联."""
+    updated_entries: list[ManifestDiffEntry] = []
+    has_change = False
+    for entry in entries:
+        wad_file = wad_index.get(entry.path.lower())
+        if wad_file is None:
+            updated_entries.append(entry)
+            continue
+        if entry.section_diffs == wad_file.section_diffs:
+            updated_entries.append(entry)
+            continue
+        updated_entries.append(
+            replace(
+                entry,
+                section_diffs=wad_file.section_diffs,
+            )
+        )
+        has_change = True
+    return tuple(updated_entries), has_change
+
+
+def _copy_manifest_runtime_context(
+    *,
+    source: ManifestDiffReport,
+    target: ManifestDiffReport,
+) -> None:
+    """复制 Manifest 运行时上下文，保持后续流程可复用缓存对象."""
+    old_manifest_obj = getattr(source, "_old_manifest_obj", None)
+    new_manifest_obj = getattr(source, "_new_manifest_obj", None)
+    object.__setattr__(target, "_old_manifest_obj", old_manifest_obj)
+    object.__setattr__(target, "_new_manifest_obj", new_manifest_obj)
+
+
+def _normalize_manifest_report_mode(mode: ManifestReportRenderMode) -> ManifestReportRenderMode:
+    """规范化并校验 manifest_report 渲染模式."""
+    allowed: set[ManifestReportRenderMode] = {"full", "summary", "none"}
+    if mode not in allowed:
+        raise ValueError(f"manifest_report_mode 仅支持 {sorted(allowed)}，当前值: {mode!r}")
+    return mode

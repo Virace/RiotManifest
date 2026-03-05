@@ -1,6 +1,10 @@
 # RiotManifest
 
-![](https://img.shields.io/badge/python-%3E%3D3.10-blue)
+[![PyPI](https://img.shields.io/pypi/v/riotmanifest?logo=pypi&logoColor=white)](https://pypi.org/project/riotmanifest/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://pypi.org/project/riotmanifest/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/riotmanifest?logo=pypi&logoColor=white)](https://pypi.org/project/riotmanifest/)
+[![Release Workflow](https://github.com/Virace/RiotManifest/actions/workflows/python-publish.yml/badge.svg)](https://github.com/Virace/RiotManifest/actions/workflows/python-publish.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/Virace/RiotManifest?logo=github)](https://github.com/Virace/RiotManifest/releases)
 
 riot 提供的 manifest 文件解析与下载工具。
 
@@ -59,9 +63,6 @@ if __name__ == "__main__":
 ## 感谢
 
 - [@CommunityDragon](https://github.com/CommunityDragon/CDTB), **CDTB**
-- JetBrains 提供开发环境支持
-
-  <a href="https://www.jetbrains.com/?from=kratos-pe" target="_blank"><img src="https://cdn.jsdelivr.net/gh/virace/kratos-pe@main/jetbrains.svg"></a>
 
 ## 许可证
 

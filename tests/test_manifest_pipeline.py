@@ -109,6 +109,57 @@ def test_build_global_task_map_keeps_hash_type(tmp_path: Path):
     assert target.hash_type == HASH_TYPE_SHA256
 
 
+def test_build_bundle_jobs_schedules_larger_jobs_first(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    large = _make_file_with_single_chunk(
+        manifest,
+        name="large.bin",
+        bundle_id=0x1010,
+        chunk_id=0xA001,
+        chunk_size=64,
+    )
+    small = _make_file_with_single_chunk(
+        manifest,
+        name="small.bin",
+        bundle_id=0x2020,
+        chunk_id=0xA002,
+        chunk_size=8,
+    )
+    medium = _make_file_with_single_chunk(
+        manifest,
+        name="medium.bin",
+        bundle_id=0x3030,
+        chunk_id=0xA003,
+        chunk_size=32,
+    )
+
+    jobs = manifest.downloader.build_bundle_jobs([small, medium, large])
+    assert [job.bundle_id for job in jobs] == [0x1010, 0x3030, 0x2020]
+    assert [manifest.downloader.job_total_bytes(job) for job in jobs] == [64, 32, 8]
+
+
+def test_dynamic_request_timeout_caps_total_and_sets_sock_read():
+    timeout = DownloadScheduler.dynamic_request_timeout(
+        total_bytes=10_000_000,
+        base_timeout_seconds=10,
+        min_transfer_speed_bytes=1,
+        max_timeout_seconds=30,
+        sock_read_timeout_seconds=12,
+    )
+    assert timeout.total == 30
+    assert timeout.sock_read == 12
+
+    tiny_timeout = DownloadScheduler.dynamic_request_timeout(
+        total_bytes=1,
+        base_timeout_seconds=10,
+        min_transfer_speed_bytes=1024 * 1024,
+        max_timeout_seconds=30,
+        sock_read_timeout_seconds=20,
+    )
+    assert tiny_timeout.total == 11
+    assert tiny_timeout.sock_read == 11
+
+
 def test_process_bundle_job_hash_mismatch(tmp_path: Path):
     manifest = _make_manifest(tmp_path)
     raw = b"hash-mismatch"
