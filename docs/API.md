@@ -132,7 +132,7 @@ print(len(data))
 ```python
 we = WADExtractor(
     manifest,
-    prefetch_chunk_concurrency=6,
+    prefetch_chunk_concurrency=16,
     recommended_max_targets_per_wad=120,
 )
 ```
