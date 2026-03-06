@@ -22,7 +22,19 @@ from riotmanifest.diff import (
 )
 from riotmanifest.downloader import DownloadProgress
 from riotmanifest.extractor import WADExtractor
-from riotmanifest.game import RiotGameData
+from riotmanifest.game import (
+    ConsistentGameManifestNotFoundError,
+    LcuVersionUnavailableError,
+    LiveConfigNotFoundError,
+    LiveManifestPair,
+    ManifestRef,
+    ResolvedVersion,
+    RiotGameData,
+    RiotGameDataError,
+    VersionDisplayMode,
+    VersionInfo,
+    VersionMatchMode,
+)
 from riotmanifest.manifest import PatcherBundle, PatcherChunk, PatcherFile, PatcherManifest
 from riotmanifest.utils.http_client import HttpClientError
 
@@ -40,6 +52,16 @@ __all__ = [
     "DownloadProgress",
     "WADExtractor",
     "RiotGameData",
+    "RiotGameDataError",
+    "LiveConfigNotFoundError",
+    "LcuVersionUnavailableError",
+    "ConsistentGameManifestNotFoundError",
+    "VersionMatchMode",
+    "VersionDisplayMode",
+    "VersionInfo",
+    "ManifestRef",
+    "ResolvedVersion",
+    "LiveManifestPair",
     "HttpClientError",
     "ManifestDiffSummary",
     "ManifestDiffEntry",

@@ -6,11 +6,13 @@
 [![Release Workflow](https://github.com/Virace/RiotManifest/actions/workflows/python-publish.yml/badge.svg)](https://github.com/Virace/RiotManifest/actions/workflows/python-publish.yml)
 [![GitHub Release](https://img.shields.io/github/v/release/Virace/RiotManifest?logo=github)](https://github.com/Virace/RiotManifest/releases)
 
-riot 提供的 manifest 文件解析与下载工具。
+Riot 提供的 manifest 解析、并发下载、WAD 按需提取与差异分析工具。
 
 - [安装](#安装)
-- [快速使用](#快速使用)
-- [完整 API 文档](#完整-api-文档)
+- [30 秒上手](#30-秒上手)
+- [常见任务](#常见任务)
+- [实践建议](#实践建议)
+- [文档导航](#文档导航)
 - [维护者](#维护者)
 - [感谢](#感谢)
 - [许可证](#许可证)
@@ -21,9 +23,9 @@ riot 提供的 manifest 文件解析与下载工具。
 pip3 install riotmanifest
 ```
 
-## 快速使用
+## 30 秒上手
 
-### 下载（异步并发，推荐）
+最常见的下载入口是 `PatcherManifest`：
 
 ```python
 import asyncio
@@ -45,13 +47,94 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-默认并发为 `16`。可通过 `PatcherManifest(..., concurrency_limit=...)` 或 `download_files_concurrently(..., concurrency_limit=...)` 调整。
+默认并发为 `16`。
 
-## 完整 API 文档
+## 常见任务
 
-完整用法（进度回调、WAD 提取、Manifest/WAD diff、性能基线）请见：
+### 1. 下载 manifest 中的一批文件
 
-- [docs/API.md](https://github.com/Virace/RiotManifest/blob/main/docs/API.md)
+- 入口：`PatcherManifest`
+- 适合：批量下载 `wad.client`、语言资源、配置文件
+
+### 2. 从 WAD 中按需提取少量文件
+
+```python
+from riotmanifest import PatcherManifest, WADExtractor
+
+manifest = PatcherManifest(manifest_url, path="")
+extractor = WADExtractor(manifest)
+
+data = extractor.extract_files(
+    {
+        "DATA/FINAL/Champions/Ahri.wad.client": [
+            "data/characters/ahri/skins/skin0.bin",
+        ]
+    }
+)
+```
+
+### 3. 比较两个版本的 manifest / WAD 差异
+
+```python
+from riotmanifest import diff_manifests, diff_wad_headers
+
+manifest_report = diff_manifests(old_manifest, new_manifest, flags="zh_CN", pattern="wad.client")
+wad_report = diff_wad_headers(manifest_report=manifest_report)
+```
+
+### 4. 获取当前 live 且版本规则明确的一对 LCU / GAME manifest
+
+```python
+from riotmanifest import RiotGameData, VersionMatchMode
+
+rgd = RiotGameData()
+pair = rgd.resolve_live_manifest_pair("EUW")
+
+print(str(pair.version))  # 例如 16.5
+print(pair.lcu.url)
+print(pair.game.url)
+
+relaxed_pair = rgd.resolve_live_manifest_pair(
+    "EUW",
+    match_mode=VersionMatchMode.IGNORE_REVISION,
+)
+```
+
+## 实践建议
+
+### 下载
+
+- 默认并发 `16` 是当前推荐值。
+- 网络或磁盘较弱时可降到 `8~12`。
+- 机器配置较好且网络稳定时，可尝试 `16~24`。
+
+### WAD 提取
+
+- `WADExtractor` 适合“少量小文件按需提取”。
+- 若单个 WAD 目标文件很多，通常更建议先下载完整 WAD 再本地处理。
+
+### 差异分析
+
+- 大多数情况下，先 `diff_manifests`，再按需进入 `diff_wad_headers`。
+- `resolve_wad_diff_paths()` 默认推荐 `extractor` 模式。
+- 仅在“需要完整落盘、后续离线复用、磁盘空间充足”时考虑 `download_root_wad`。
+
+### RiotGameData
+
+- 默认优先使用 `STRICT`，确保 build 级完全一致。
+- 当你明确接受“同补丁内可能只有 exe / dll 修订、资源通常不变”时，再使用 `IGNORE_REVISION`。
+- `str(pair.version)` 默认输出补丁号，例如 `16.5`；如需精确显示，可读取 `pair.version.lcu.display_version` 或 `pair.version.game.display_version`。
+
+## 文档导航
+
+详细文档已按功能拆分：
+
+- [docs/API.md](docs/API.md)：文档导航页
+- [docs/manifest.md](docs/manifest.md)：Manifest 下载参考
+- [docs/extractor.md](docs/extractor.md)：WADExtractor 参考
+- [docs/diff.md](docs/diff.md)：差异分析参考
+- [docs/game.md](docs/game.md)：RiotGameData / 版本对象参考
+- [docs/TESTING.md](docs/TESTING.md)：测试与基准说明
 
 ## 维护者
 

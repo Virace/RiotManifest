@@ -4,7 +4,10 @@ from pathlib import Path
 import pytest
 
 from riotmanifest.extractor import WADExtractor
-from riotmanifest.game import RiotGameData
+from riotmanifest.game import (
+    LiveConfigNotFoundError,
+    RiotGameData,
+)
 from riotmanifest.game.metadata import first_value, parse_game_release, version_key
 from riotmanifest.manifest import DecompressError, DownloadError, PatcherBundle, PatcherFile, PatcherManifest
 
@@ -529,9 +532,7 @@ def test_load_lcu_data_skips_invalid_configs(monkeypatch):
                             {
                                 "id": "EUW",
                                 "patch_url": "https://example.invalid/euw.manifest",
-                                "metadata": {
-                                    "theme_manifest": "https://example.invalid/releases/14.4.1/theme/data"
-                                },
+                                "metadata": {"theme_manifest": "https://example.invalid/releases/14.4.1/theme/data"},
                             },
                         ]
                     }
@@ -569,7 +570,9 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
     assert data.available_game_regions() == ["EUW1", "KR"]
 
 
-def test_build_lcu_extractor_requires_loaded_region():
+def test_build_lcu_extractor_requires_live_region(monkeypatch):
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: {})
+
     data = RiotGameData()
-    with pytest.raises(ValueError, match="EUW"):
+    with pytest.raises(LiveConfigNotFoundError, match="EUW"):
         data.build_lcu_extractor("EUW")
