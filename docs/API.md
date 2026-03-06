@@ -264,14 +264,55 @@ resolved_report.manifest_report.dump_pretty_json(
 ## RiotGameData
 
 ```python
-from riotmanifest.game import RiotGameData
+from riotmanifest import RiotGameData, VersionDisplayMode, VersionMatchMode
 
 rgd = RiotGameData()
-rgd.load_game_data(regions=["EUW1"])
 
-# 显式构造 Extractor
-extractor = rgd.build_game_extractor("EUW1", cache_max_entries=256, manifest_path="")
+# 默认严格匹配：返回当前 live 且版本一致的一对 LCU/GAME manifest
+pair = rgd.resolve_live_manifest_pair("EUW")
+print(str(pair.version))  # 默认输出 16.5
+print(pair.lcu.url)
+print(pair.game.url)
+print(pair.is_exact_match)
+print(pair.version.lcu.display_version)   # 16.5.751.1533
+print(pair.version.game.display_version)  # 16.5.7511533
+
+# 也可以只拿统一版本号对象
+version = rgd.resolve_live_version("EUW")
+print(str(version))  # 16.5
+
+# 显式构造当前 live 的 GAME Extractor
+extractor = rgd.build_game_extractor("EUW", cache_max_entries=256, manifest_path="")
+
+# 当同补丁内存在仅 exe/dll 修订、资源未变化的情况时，
+# 可显式放宽到“忽略修订号”模式
+relaxed_pair = rgd.resolve_live_manifest_pair(
+    "EUW",
+    match_mode=VersionMatchMode.IGNORE_REVISION,
+)
+print(relaxed_pair.match_reason)
+print(str(relaxed_pair.version))  # 默认仍输出补丁号
+print(relaxed_pair.version.with_display_mode(VersionDisplayMode.LCU))
 ```
+
+说明：
+
+- `resolve_live_manifest_pair()` 是 `RiotGameData` 的主入口。
+- `pair.version` 是统一版本号对象，默认字符串输出为“忽略修订号”的补丁版本，例如 `16.5`。
+- `pair.version.lcu` 与 `pair.version.game` 分别保留 LCU / GAME 的完整版本信息。
+- 默认 `STRICT` 模式会先解析当前 live LCU manifest 的精确客户端版本，再在同一 live 配置对应的 GAME 候选中查找完全一致的 build。
+- `IGNORE_REVISION` 模式仅要求 `major.minor` 一致，适合“同补丁内多次修订，但资源文件通常未变化”的场景。
+- `build_game_extractor("EUW")` 现在以 LCU live 区域作为输入，而不是直接传 `EUW1` 这类 `version_set`。
+
+旧接口迁移：
+
+- 旧写法：
+  - `load_lcu_data()` + `latest_lcu()`
+  - `load_game_data()` + `latest_game()`
+- 新写法：
+  - `resolve_live_manifest_pair()`：直接获取当前 live 且版本规则明确的一对 manifest
+  - `build_game_extractor()`：直接基于当前 live 一致对构造 GAME extractor
+  - `get_live_lcu_manifest()` / `list_live_game_candidates()`：仅在你确实需要拆开处理底层数据时使用
 
 ## 测试与基准文档
 
