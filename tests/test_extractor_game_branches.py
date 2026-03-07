@@ -555,7 +555,7 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
             return {
                 "releases": [
                     123,
-                    _make_game_release("14.2.1+meta", "https://example.invalid/kr-1421.manifest"),
+                    _make_game_release("14.2.1234501+meta", "https://example.invalid/kr-1421.manifest"),
                 ]
             }
         return {
@@ -568,7 +568,7 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
     data.load_game_data(regions=["KR", "EUW1"])
 
     with pytest.warns(FutureWarning, match="latest_game\\(\\) 已弃用"):
-        assert data.latest_game("KR") == {"version": "14.2.1", "url": "https://example.invalid/kr-1421.manifest"}
+        assert data.latest_game("KR") == {"version": "14.2.1234501", "url": "https://example.invalid/kr-1421.manifest"}
     assert data.available_game_regions() == ["EUW1", "KR"]
 
 

@@ -74,9 +74,9 @@
 - `IGNORE_REVISION`
   - 默认，输出补丁号，例如 `16.5`
 - `LCU`
-  - 输出 LCU 显示版本，例如 `16.5.751.1533`
+  - 输出四段点分版本，例如 `16.5.751.1533`
 - `GAME`
-  - 输出 GAME 显示版本，例如 `16.5.7511533`
+  - 输出三段紧凑版本，例如 `16.5.7511533`
 
 ### `VersionInfo`
 
@@ -84,18 +84,36 @@
 
 字段：
 
-- `display_version`
+- `metadata_version`
+  - metadata 来源的三段版本号，例如 `16.5.7511533`
+  - LCU 当前通常为 `None`
+- `exe_version`
+  - exe 来源的四段版本号，例如 `16.5.751.1533`
 - `normalized_build`
+  - 统一比较值，例如 `16.5.7511533`
 - `patch_version`
+  - 统一补丁号，例如 `16.5`
+
+兼容与视图属性：
+
+- `display_version`
+  - 兼容旧接口的默认显示值
+  - 有 `metadata_version` 时优先显示三段版本，否则显示四段 exe 版本
+- `compact_version`
+  - 三段紧凑版本号，例如 `16.5.7511533`
+- `dotted_version`
+  - 四段点分版本号，例如 `16.5.751.1533`
 
 示例：
 
 - LCU
-  - `display_version = "16.5.751.1533"`
+  - `metadata_version = None`
+  - `exe_version = "16.5.751.1533"`
   - `normalized_build = "16.5.7511533"`
   - `patch_version = "16.5"`
-- GAME
-  - `display_version = "16.5.7511533"`
+- GAME（metadata 路径）
+  - `metadata_version = "16.5.7511533"`
+  - `exe_version = None`
   - `normalized_build = "16.5.7511533"`
   - `patch_version = "16.5"`
 
@@ -287,6 +305,7 @@ resolve_version(
 规则：
 
 - `lcu.version.normalized_build == game.version.normalized_build`
+- `metadata_version` 与 `exe_version` 只是来源/格式视图，严格比较统一看 `normalized_build`
 
 找不到就失败，不做隐式回退。
 

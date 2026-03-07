@@ -52,9 +52,27 @@ class VersionDisplayMode(str, Enum):  # noqa: UP042
 class VersionInfo:
     """版本信息标准模型."""
 
-    display_version: str
     normalized_build: str
     patch_version: str
+    metadata_version: str | None = None
+    exe_version: str | None = None
+
+    @property
+    def compact_version(self) -> str:
+        """返回三段紧凑版本号."""
+        return self.metadata_version or self.normalized_build
+
+    @property
+    def dotted_version(self) -> str:
+        """返回四段点分版本号."""
+        return self.exe_version or _compact_to_dotted_version(self.normalized_build)
+
+    @property
+    def display_version(self) -> str:
+        """返回兼容旧接口的默认展示版本号."""
+        if self.metadata_version is not None:
+            return self.metadata_version
+        return self.dotted_version
 
 
 @dataclass(frozen=True)
@@ -86,9 +104,9 @@ class ResolvedVersion:
     def value(self) -> str:
         """返回当前显示模式下的字符串值."""
         if self.display_mode is VersionDisplayMode.LCU:
-            return self.lcu.display_version
+            return self.lcu.dotted_version
         if self.display_mode is VersionDisplayMode.GAME:
-            return self.game.display_version
+            return self.game.compact_version
         return self.patch_version
 
     def with_display_mode(self, display_mode: VersionDisplayMode) -> ResolvedVersion:
@@ -206,29 +224,59 @@ def _run_coroutine_sync(coroutine: Any) -> Any:
     return result.get("value")
 
 
-def _build_lcu_version_info(display_version: str) -> VersionInfo:
-    """把 LCU 显示版本转换为标准版本模型."""
-    parts = display_version.split(".")
-    if len(parts) != 4 or not all(part.isdigit() for part in parts):
-        raise LcuVersionUnavailableError(f"无法解析 LCU 版本号: {display_version}")
 
+
+def _compact_to_dotted_version(compact_version: str) -> str:
+    """把三段紧凑版本号转换为四段点分版本号."""
+    parts = compact_version.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError(f"无法把紧凑版本号转换为四段格式: {compact_version}")
+
+    build = parts[2]
+    if len(build) <= 4:
+        raise ValueError(f"紧凑版本号第三段长度不足，无法拆分为 3/4 结构: {compact_version}")
+    return f"{parts[0]}.{parts[1]}.{build[:-4]}.{build[-4:]}"
+
+
+def _normalize_metadata_version(metadata_version: str) -> tuple[str, str]:
+    """标准化 metadata 版本号并返回紧凑 build 与补丁号."""
+    sanitized = metadata_version.split("+", 1)[0]
+    parts = sanitized.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ConsistentGameManifestNotFoundError(f"无法解析 GAME metadata 版本号: {metadata_version}")
+    if len(parts[2]) <= 4:
+        raise ConsistentGameManifestNotFoundError(
+            f"GAME metadata 版本号不满足 3/4 结构约束: {metadata_version}"
+        )
+    return sanitized, f"{parts[0]}.{parts[1]}"
+
+
+def _normalize_exe_version(exe_version: str) -> tuple[str, str]:
+    """标准化 exe 版本号并返回紧凑 build 与补丁号."""
+    parts = exe_version.split(".")
+    if len(parts) != 4 or not all(part.isdigit() for part in parts):
+        raise LcuVersionUnavailableError(f"无法解析 exe 版本号: {exe_version}")
+    if len(parts[3]) != 4:
+        raise LcuVersionUnavailableError(f"exe 版本号第四段不满足 4 位约束: {exe_version}")
+    return f"{parts[0]}.{parts[1]}.{parts[2]}{parts[3]}", f"{parts[0]}.{parts[1]}"
+
+def _build_lcu_version_info(exe_version: str) -> VersionInfo:
+    """把 LCU exe 版本转换为标准版本模型."""
+    compact_version, patch_version = _normalize_exe_version(exe_version)
     return VersionInfo(
-        display_version=display_version,
-        normalized_build=f"{parts[0]}.{parts[1]}.{parts[2]}{parts[3]}",
-        patch_version=f"{parts[0]}.{parts[1]}",
+        normalized_build=compact_version,
+        patch_version=patch_version,
+        exe_version=exe_version,
     )
 
 
-def _build_game_version_info(display_version: str) -> VersionInfo:
-    """把 GAME 显示版本转换为标准版本模型."""
-    parts = display_version.split(".")
-    if len(parts) < 3 or not all(part.isdigit() for part in parts):
-        raise ConsistentGameManifestNotFoundError(f"无法解析 GAME 版本号: {display_version}")
-
+def _build_game_version_info(metadata_version: str) -> VersionInfo:
+    """把 GAME metadata 版本转换为标准版本模型."""
+    compact_version, patch_version = _normalize_metadata_version(metadata_version)
     return VersionInfo(
-        display_version=display_version,
-        normalized_build=display_version,
-        patch_version=f"{parts[0]}.{parts[1]}",
+        normalized_build=compact_version,
+        patch_version=patch_version,
+        metadata_version=compact_version,
     )
 
 

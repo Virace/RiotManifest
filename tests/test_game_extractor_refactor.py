@@ -7,12 +7,14 @@ import pytest
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import (
     ConsistentGameManifestNotFoundError,
+    LcuVersionUnavailableError,
     LeagueManifestResolver,
     LiveConfigNotFoundError,
     VersionDisplayMode,
     VersionInfo,
     VersionMatchMode,
 )
+from riotmanifest.game.factory import _build_game_version_info, _build_lcu_version_info
 from riotmanifest.manifest import PatcherBundle, PatcherFile, PatcherManifest
 
 
@@ -177,8 +179,8 @@ def test_load_game_data_for_non_default_region(monkeypatch):
         assert "version-sets/KR" in url
         return {
             "releases": [
-                _make_game_release("14.2.0+meta", "https://example.invalid/kr-1420.manifest"),
-                _make_game_release("14.2.1+meta", "https://example.invalid/kr-1421.manifest"),
+                _make_game_release("14.2.1234500+meta", "https://example.invalid/kr-1420.manifest"),
+                _make_game_release("14.2.1234501+meta", "https://example.invalid/kr-1421.manifest"),
             ]
         }
 
@@ -189,7 +191,7 @@ def test_load_game_data_for_non_default_region(monkeypatch):
     with pytest.warns(FutureWarning, match="latest_game\\(\\) 已弃用"):
         latest = data.latest_game("KR")
     assert latest is not None
-    assert latest["version"] == "14.2.1"
+    assert latest["version"] == "14.2.1234501"
     assert latest["url"] == "https://example.invalid/kr-1421.manifest"
 
 
@@ -331,9 +333,9 @@ def test_resolve_manifest_pair_prefers_exact_build(monkeypatch):
         data._lcu_version_resolver,
         "resolve",
         lambda manifest_url: VersionInfo(
-            display_version="16.5.751.1533",
             normalized_build="16.5.7511533",
             patch_version="16.5",
+            exe_version="16.5.751.1533",
         ),
     )
 
@@ -398,9 +400,9 @@ def test_resolve_manifest_pair_ignore_revision_fallback(monkeypatch):
         data._lcu_version_resolver,
         "resolve",
         lambda manifest_url: VersionInfo(
-            display_version="16.5.751.8496",
             normalized_build="16.5.7518496",
             patch_version="16.5",
+            exe_version="16.5.751.8496",
         ),
     )
 
@@ -463,9 +465,9 @@ def test_resolve_manifest_pair_defaults_to_ignore_revision(monkeypatch):
         data._lcu_version_resolver,
         "resolve",
         lambda manifest_url: VersionInfo(
-            display_version="16.5.751.8496",
             normalized_build="16.5.7518496",
             patch_version="16.5",
+            exe_version="16.5.751.8496",
         ),
     )
 
@@ -523,9 +525,9 @@ def test_resolve_manifest_pair_ignore_revision_raises_when_all_patch_candidates_
         data._lcu_version_resolver,
         "resolve",
         lambda manifest_url: VersionInfo(
-            display_version="16.5.750.9999",
             normalized_build="16.5.7509999",
             patch_version="16.5",
+            exe_version="16.5.750.9999",
         ),
     )
 
@@ -587,9 +589,9 @@ def test_resolve_manifest_pair_patch_latest_picks_newest_same_patch(monkeypatch)
         data._lcu_version_resolver,
         "resolve",
         lambda manifest_url: VersionInfo(
-            display_version="16.5.751.8496",
             normalized_build="16.5.7518496",
             patch_version="16.5",
+            exe_version="16.5.751.8496",
         ),
     )
 
@@ -649,9 +651,9 @@ def test_resolve_manifest_pair_strict_raises_without_exact_match(monkeypatch):
         data._lcu_version_resolver,
         "resolve",
         lambda manifest_url: VersionInfo(
-            display_version="16.5.751.1533",
             normalized_build="16.5.7511533",
             patch_version="16.5",
+            exe_version="16.5.751.1533",
         ),
     )
 
@@ -668,16 +670,31 @@ def test_extract_windows_version_from_utf16_payload():
     assert LeagueManifestResolver()._lcu_version_resolver._extract_windows_version(payload) == "16.5.751.1533"
 
 
+def test_build_game_version_info_normalizes_metadata_version():
+    version = _build_game_version_info("16.5.7511533+branch.releases-16-5.content.release")
+
+    assert version.metadata_version == "16.5.7511533"
+    assert version.exe_version is None
+    assert version.compact_version == "16.5.7511533"
+    assert version.dotted_version == "16.5.751.1533"
+    assert version.patch_version == "16.5"
+
+
+def test_build_lcu_version_info_requires_four_segment_exe_version():
+    with pytest.raises(LcuVersionUnavailableError, match="第四段不满足 4 位约束"):
+        _build_lcu_version_info("16.5.751.33")
+
+
 def test_resolved_version_supports_multiple_display_modes():
     data = VersionInfo(
-        display_version="16.5.751.1533",
         normalized_build="16.5.7511533",
         patch_version="16.5",
+        exe_version="16.5.751.1533",
     )
     game = VersionInfo(
-        display_version="16.5.7511533",
         normalized_build="16.5.7511533",
         patch_version="16.5",
+        metadata_version="16.5.7511533",
     )
 
     from riotmanifest.game import ResolvedVersion
