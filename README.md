@@ -85,9 +85,9 @@ wad_report = diff_wad_headers(manifest_report=manifest_report)
 ### 4. 获取当前 live 且版本规则明确的一对 LCU / GAME manifest
 
 ```python
-from riotmanifest import RiotGameData
+from riotmanifest import LeagueManifestResolver
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 pair = rgd.resolve_live_manifest_pair("EUW")
 
 print(str(pair.version))  # 例如 16.5
@@ -96,7 +96,7 @@ print(pair.game.url)
 ```
 
 > 重要：
-> `RiotGameData` 的默认 `match_mode` 现在就是
+> `LeagueManifestResolver` 的默认 `match_mode` 现在就是
 > `VersionMatchMode.IGNORE_REVISION`。
 > Riot 的 live 发布经常出现“GAME 先更新、LCU 稍后更新”的窗口期；
 > 同时 `patchsieve` 只暴露当前滚动窗口中的少量 GAME 候选，不是完整历史库。
@@ -104,6 +104,7 @@ print(pair.game.url)
 > 如果你只处理 `wad.client`、语言包、贴图、音频等资源文件，通常可以忽略修订号，
 > 只按补丁版本匹配。只有在你明确要求 EXE / DLL / build 级完全一致时，
 > 才建议使用 `STRICT` 并自行处理失败。
+> 旧类名 `RiotGameData` 仍保留为兼容别名，实例化时会发出 `FutureWarning`。
 
 ## 实践建议
 
@@ -124,7 +125,7 @@ print(pair.game.url)
 - `resolve_wad_diff_paths()` 默认推荐 `extractor` 模式。
 - 仅在“需要完整落盘、后续离线复用、磁盘空间充足”时考虑 `download_root_wad`。
 
-### RiotGameData
+### LeagueManifestResolver
 
 - 默认 `match_mode` 现在就是 `IGNORE_REVISION`。
 - Riot live 常见顺序是 GAME 先更新、LCU 稍后更新，因此 `STRICT` 在 live 场景里大概率失败。
@@ -142,7 +143,7 @@ print(pair.game.url)
 - [docs/manifest.md](docs/manifest.md)：Manifest 下载参考
 - [docs/extractor.md](docs/extractor.md)：WADExtractor 参考
 - [docs/diff.md](docs/diff.md)：差异分析参考
-- [docs/game.md](docs/game.md)：RiotGameData / 版本对象参考
+- [docs/game.md](docs/game.md)：LeagueManifestResolver / 版本对象参考
 - [docs/TESTING.md](docs/TESTING.md)：测试与基准说明
 
 ## 维护者

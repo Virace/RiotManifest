@@ -25,6 +25,7 @@ from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import (
     ConsistentGameManifestNotFoundError,
     LcuVersionUnavailableError,
+    LeagueManifestResolver,
     LiveConfigNotFoundError,
     LiveManifestPair,
     ManifestRef,
@@ -51,6 +52,7 @@ __all__ = [
     "PatcherManifest",
     "DownloadProgress",
     "WADExtractor",
+    "LeagueManifestResolver",
     "RiotGameData",
     "RiotGameDataError",
     "LiveConfigNotFoundError",

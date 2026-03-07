@@ -1,8 +1,8 @@
-# RiotGameData 参考
+# LeagueManifestResolver 参考
 
 ## 作用范围
 
-本文件说明 `RiotGameData` 当前的定位、数据结构、匹配逻辑和对外版本对象。
+本文件说明 `LeagueManifestResolver` 当前的定位、数据结构、匹配逻辑和对外版本对象。
 
 定义位置：
 - [src/riotmanifest/game/factory.py](../src/riotmanifest/game/factory.py)
@@ -10,13 +10,18 @@
 
 ## 当前定位
 
-`RiotGameData` 当前不是“完整历史版本管理器”。  
+`LeagueManifestResolver` 当前不是“完整历史版本管理器”。  
 它的职责已经收敛为：
 
 - 从 Riot 官方当前 live 配置中定位 LCU manifest
 - 找到当前 live 对应的 GAME 候选集合
 - 按规则构造“当前 live 且版本规则明确”的一对 LCU/GAME manifest
 - 提供统一版本号对象
+
+## 兼容说明
+
+- `RiotGameData` 仍保留为兼容旧名，实例化时会发出 `FutureWarning`。
+- 旧类名计划在 `v3.0.0` 删除；新代码请直接使用 `LeagueManifestResolver`。
 
 ## 数据源逻辑
 
@@ -163,7 +168,7 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 
 ### `RiotGameDataError`
 
-`RiotGameData` 相关错误基类。
+`RiotGameDataError` 当前仍作为兼容错误基类保留。
 
 ### `LiveConfigNotFoundError`
 
@@ -177,7 +182,7 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 
 表示当前 GAME 候选集合中，找不到满足匹配规则的版本。
 
-## `RiotGameData` 公开方法
+## `LeagueManifestResolver` 公开方法
 
 ### `get_live_lcu_manifest(region="EUW")`
 
@@ -356,7 +361,7 @@ resolve_live_version(
 
 ## 强烈建议（live 资源场景）
 
-- `RiotGameData` 现在默认就使用 `VersionMatchMode.IGNORE_REVISION`。
+- `LeagueManifestResolver` 现在默认就使用 `VersionMatchMode.IGNORE_REVISION`。
 - 如果你的目标是下载 WAD、语言包、贴图、音频等资源，请优先使用 `IGNORE_REVISION`。
 - 如果你明确要“同补丁下最新 GAME”，再显式切到 `PATCH_LATEST`。
 - 如果你坚持使用 `STRICT`，应预期它在 live 窗口期经常抛出 `ConsistentGameManifestNotFoundError`。
@@ -366,9 +371,9 @@ resolve_live_version(
 ### 拿当前 live 且版本一致的一对 URL
 
 ```python
-from riotmanifest import RiotGameData
+from riotmanifest import LeagueManifestResolver
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 pair = rgd.resolve_live_manifest_pair("EUW")
 
 print(pair.lcu.url)
@@ -378,9 +383,9 @@ print(pair.game.url)
 ### 拿统一版本号
 
 ```python
-from riotmanifest import RiotGameData
+from riotmanifest import LeagueManifestResolver
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 version = rgd.resolve_live_version("EUW")
 print(str(version))  # 16.5
 ```
@@ -388,9 +393,9 @@ print(str(version))  # 16.5
 ### 切换版本号显示模式
 
 ```python
-from riotmanifest import RiotGameData, VersionDisplayMode
+from riotmanifest import LeagueManifestResolver, VersionDisplayMode
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 version = rgd.resolve_live_version("EUW")
 
 print(version.with_display_mode(VersionDisplayMode.LCU))
@@ -400,18 +405,18 @@ print(version.with_display_mode(VersionDisplayMode.GAME))
 ### 默认推荐：使用默认匹配模式
 
 ```python
-from riotmanifest import RiotGameData
+from riotmanifest import LeagueManifestResolver
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 pair = rgd.resolve_live_manifest_pair("EUW")
 ```
 
 ### 如果你要同补丁里的最新 GAME
 
 ```python
-from riotmanifest import RiotGameData, VersionMatchMode
+from riotmanifest import LeagueManifestResolver, VersionMatchMode
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 pair = rgd.resolve_live_manifest_pair(
     "EUW",
     match_mode=VersionMatchMode.PATCH_LATEST,
@@ -423,11 +428,11 @@ pair = rgd.resolve_live_manifest_pair(
 ```python
 from riotmanifest import (
     ConsistentGameManifestNotFoundError,
-    RiotGameData,
+    LeagueManifestResolver,
     VersionMatchMode,
 )
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 
 try:
     pair = rgd.resolve_live_manifest_pair(
@@ -461,9 +466,9 @@ game = rgd.latest_game("EUW1")
 推荐迁移为：
 
 ```python
-from riotmanifest import RiotGameData, VersionMatchMode
+from riotmanifest import LeagueManifestResolver, VersionMatchMode
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 pair = rgd.resolve_live_manifest_pair(
     "EUW",
     match_mode=VersionMatchMode.IGNORE_REVISION,
@@ -473,9 +478,9 @@ pair = rgd.resolve_live_manifest_pair(
 如果只想取版本号：
 
 ```python
-from riotmanifest import RiotGameData, VersionMatchMode
+from riotmanifest import LeagueManifestResolver, VersionMatchMode
 
-rgd = RiotGameData()
+rgd = LeagueManifestResolver()
 version = rgd.resolve_live_version(
     "EUW",
     match_mode=VersionMatchMode.IGNORE_REVISION,

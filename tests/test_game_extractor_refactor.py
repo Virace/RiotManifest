@@ -7,8 +7,8 @@ import pytest
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import (
     ConsistentGameManifestNotFoundError,
+    LeagueManifestResolver,
     LiveConfigNotFoundError,
-    RiotGameData,
     VersionDisplayMode,
     VersionInfo,
     VersionMatchMode,
@@ -184,7 +184,7 @@ def test_load_game_data_for_non_default_region(monkeypatch):
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_game_data(regions=["KR"])
     with pytest.warns(FutureWarning, match="latest_game\\(\\) 已弃用"):
         latest = data.latest_game("KR")
@@ -196,7 +196,7 @@ def test_load_game_data_for_non_default_region(monkeypatch):
 def test_build_game_extractor_requires_live_region(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: {})
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     with pytest.raises(LiveConfigNotFoundError, match="EUW"):
         data.build_game_extractor("EUW")
 
@@ -217,14 +217,14 @@ def test_build_game_extractor_uses_resolved_pair(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.factory.PatcherManifest", _DummyManifest)
     monkeypatch.setattr("riotmanifest.game.factory.WADExtractor", _DummyExtractor)
     monkeypatch.setattr(
-        RiotGameData,
+        LeagueManifestResolver,
         "resolve_live_manifest_pair",
         lambda self, region, match_mode=VersionMatchMode.IGNORE_REVISION: types.SimpleNamespace(
             game=types.SimpleNamespace(url="https://example.invalid/euw-live.manifest")
         ),
     )
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     extractor = data.build_game_extractor("EUW", cache_max_entries=64)
     assert isinstance(extractor, _DummyExtractor)
     assert isinstance(captured["manifest"], _DummyManifest)
@@ -268,7 +268,7 @@ def test_load_lcu_and_build_extractor(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.factory.PatcherManifest", _DummyManifest)
     monkeypatch.setattr("riotmanifest.game.factory.WADExtractor", _DummyExtractor)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_lcu_data()
     with pytest.warns(FutureWarning, match="latest_lcu\\(\\) 已弃用"):
         latest = data.latest_lcu("EUW")
@@ -326,7 +326,7 @@ def test_resolve_live_manifest_pair_prefers_exact_build(monkeypatch):
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     monkeypatch.setattr(
         data._lcu_version_resolver,
         "resolve",
@@ -393,7 +393,7 @@ def test_resolve_live_manifest_pair_ignore_revision_fallback(monkeypatch):
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     monkeypatch.setattr(
         data._lcu_version_resolver,
         "resolve",
@@ -458,7 +458,7 @@ def test_resolve_live_manifest_pair_defaults_to_ignore_revision(monkeypatch):
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     monkeypatch.setattr(
         data._lcu_version_resolver,
         "resolve",
@@ -518,7 +518,7 @@ def test_resolve_live_manifest_pair_ignore_revision_raises_when_all_patch_candid
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     monkeypatch.setattr(
         data._lcu_version_resolver,
         "resolve",
@@ -582,7 +582,7 @@ def test_resolve_live_manifest_pair_patch_latest_picks_newest_same_patch(monkeyp
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     monkeypatch.setattr(
         data._lcu_version_resolver,
         "resolve",
@@ -644,7 +644,7 @@ def test_resolve_live_manifest_pair_strict_raises_without_exact_match(monkeypatc
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     monkeypatch.setattr(
         data._lcu_version_resolver,
         "resolve",
@@ -665,7 +665,7 @@ def test_resolve_live_manifest_pair_strict_raises_without_exact_match(monkeypatc
 def test_extract_windows_version_from_utf16_payload():
     payload = b"prefix" + "FileVersion".encode("utf-16le") + b"\x00\x00" + "16.5.751.1533".encode("utf-16le") + b"suffix"
 
-    assert RiotGameData()._lcu_version_resolver._extract_windows_version(payload) == "16.5.751.1533"
+    assert LeagueManifestResolver()._lcu_version_resolver._extract_windows_version(payload) == "16.5.751.1533"
 
 
 def test_resolved_version_supports_multiple_display_modes():

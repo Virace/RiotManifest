@@ -5,8 +5,8 @@ import pytest
 
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import (
+    LeagueManifestResolver,
     LiveConfigNotFoundError,
-    RiotGameData,
 )
 from riotmanifest.game.metadata import first_value, parse_game_release, version_key
 from riotmanifest.manifest import DecompressError, DownloadError, PatcherBundle, PatcherFile, PatcherManifest
@@ -510,7 +510,7 @@ def test_parse_game_release_filters_invalid_inputs(release):
 def test_load_lcu_data_non_dict_response(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: [])
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_lcu_data()
 
     assert data.available_lcu_regions() == []
@@ -542,7 +542,7 @@ def test_load_lcu_data_skips_invalid_configs(monkeypatch):
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_lcu_data()
 
     with pytest.warns(FutureWarning, match="latest_lcu\\(\\) 已弃用"):
@@ -564,7 +564,7 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_game_data(regions=["KR", "EUW1"])
 
     with pytest.warns(FutureWarning, match="latest_game\\(\\) 已弃用"):
@@ -575,6 +575,6 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
 def test_build_lcu_extractor_requires_live_region(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: {})
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     with pytest.raises(LiveConfigNotFoundError, match="EUW"):
         data.build_lcu_extractor("EUW")

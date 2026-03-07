@@ -148,19 +148,34 @@ class ConsistentGameManifestNotFoundError(RiotGameDataError):
 
 
 DEPRECATED_LATEST_API_REMOVE_VERSION = "3.0.0"
+DEPRECATED_RIOT_GAME_DATA_ALIAS_REMOVE_VERSION = "3.0.0"
 
 
-def _warn_deprecated_latest_api(*, api_name: str, replacement: str) -> None:
+def _warn_deprecated_latest_api(*, owner_name: str, api_name: str, replacement: str) -> None:
     """发出 latest 兼容接口的弃用提示.
 
     Args:
+        owner_name: 触发该接口的类名。
         api_name: 被调用的旧接口名。
         replacement: 推荐替代调用说明。
     """
     warnings.warn(
         (
-            f"RiotGameData.{api_name}() 已弃用，计划在 v{DEPRECATED_LATEST_API_REMOVE_VERSION} 删除。"
+            f"{owner_name}.{api_name}() 已弃用，计划在 v{DEPRECATED_LATEST_API_REMOVE_VERSION} 删除。"
             f"请改用 {replacement}。"
+        ),
+        FutureWarning,
+        stacklevel=3,
+    )
+
+
+def _warn_deprecated_riot_game_data_alias() -> None:
+    """发出 `RiotGameData` 旧类名的弃用提示."""
+    warnings.warn(
+        (
+            "RiotGameData 已弃用，计划在 "
+            f"v{DEPRECATED_RIOT_GAME_DATA_ALIAS_REMOVE_VERSION} 删除。"
+            "请改用 LeagueManifestResolver。"
         ),
         FutureWarning,
         stacklevel=3,
@@ -357,8 +372,8 @@ class _LcuVersionResolver:
         return match.group("patch")
 
 
-class RiotGameData:
-    """整合当前 live 的 LCU/GAME 清单信息并构造一致版本对."""
+class LeagueManifestResolver:
+    """整合当前 live 的《英雄联盟》LCU/GAME 清单信息并构造一致版本对."""
 
     def __init__(self) -> None:
         """初始化区域缓存与版本解析器."""
@@ -413,6 +428,7 @@ class RiotGameData:
             或 `get_live_lcu_manifest(...)`。
         """
         _warn_deprecated_latest_api(
+            owner_name=self.__class__.__name__,
             api_name="latest_lcu",
             replacement=(
                 "resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)"
@@ -438,6 +454,7 @@ class RiotGameData:
             `resolve_live_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`。
         """
         _warn_deprecated_latest_api(
+            owner_name=self.__class__.__name__,
             api_name="latest_game",
             replacement="resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)",
         )
@@ -707,3 +724,12 @@ class RiotGameData:
     def available_game_regions(self) -> list[str]:
         """返回当前缓存中的 GAME version-set 列表."""
         return sorted(self._game_data.keys())
+
+
+class RiotGameData(LeagueManifestResolver):
+    """`LeagueManifestResolver` 的兼容旧名."""
+
+    def __init__(self) -> None:
+        """初始化兼容旧名实例，并发出弃用提示."""
+        _warn_deprecated_riot_game_data_alias()
+        super().__init__()

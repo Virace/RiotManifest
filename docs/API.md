@@ -10,7 +10,7 @@
 2. [manifest.md](./manifest.md)：Manifest 下载主线
 3. [extractor.md](./extractor.md)：WAD 按需提取
 4. [diff.md](./diff.md)：Manifest / WAD 差异分析与 BIN 路径回填
-5. [game.md](./game.md)：`RiotGameData`、live 一致对、版本对象与错误语义
+5. [game.md](./game.md)：`LeagueManifestResolver`、live 一致对、版本对象与错误语义
 6. [TESTING.md](./TESTING.md)：测试脚本、验证方式与基准说明
 
 ## 按任务选文档
@@ -72,9 +72,10 @@
 - `WADPathProvider`
 - `ManifestBinPathProvider`
 
-### RiotGameData 与版本对象
+### LeagueManifestResolver 与版本对象
 
-- `RiotGameData`
+- `LeagueManifestResolver`
+- `RiotGameData`（兼容旧名，实例化时会发出 `FutureWarning`，计划在 `v3.0.0` 删除）
 - `VersionMatchMode`
 - `VersionDisplayMode`
 - `VersionInfo`

@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from riotmanifest.game import RiotGameData
+from riotmanifest.game import LeagueManifestResolver
 from riotmanifest.manifest import PatcherFile, PatcherManifest
 from riotmanifest.utils.http_client import HttpClientError
 
@@ -79,7 +79,7 @@ def _load_latest_game_with_retry(region: str, retries: int, retry_delay_sec: flo
     last_error = None
     for attempt in range(retries):
         try:
-            rgd = RiotGameData()
+            rgd = LeagueManifestResolver()
             rgd.load_game_data(regions=[region])
             latest = rgd.latest_game(region)
             if latest:
