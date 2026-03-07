@@ -67,3 +67,31 @@ uv run python scripts/bench_downloader.py \
   --rounds 3 \
   --dry-run
 ```
+
+
+## 真实 manifest 样本
+
+开发期如果要手动验证 `LeagueManifestInspector` 或版本提取链路，可直接使用 `Morilli/riot-manifests`。
+该仓库的 `LoL/<region>/<platform>/<artifact>/*.txt` 文件内容就是原始 manifest URL。
+
+当前已验证的一组 EUW1 Windows 样本：
+
+- `LoL/EUW1/windows/league-client/16.5.751.8496.txt`
+- `LoL/EUW1/windows/lol-game-client/16.5.7511533.txt`
+
+可用下面的 smoke 命令快速验证：
+
+```bash
+uv run python - <<'PY'
+from riotmanifest import LeagueManifestInspector
+
+inspector = LeagueManifestInspector()
+pair = inspector.inspect_pair(
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/8E78E3C2EFDB30F0.manifest",
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/79CFFE595C2B0C01.manifest",
+)
+print(pair.match_reason)
+print(pair.version.lcu.display_version)
+print(pair.version.game.display_version)
+PY
+```

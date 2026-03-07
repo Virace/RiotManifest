@@ -52,9 +52,27 @@ class VersionDisplayMode(str, Enum):  # noqa: UP042
 class VersionInfo:
     """版本信息标准模型."""
 
-    display_version: str
     normalized_build: str
     patch_version: str
+    metadata_version: str | None = None
+    exe_version: str | None = None
+
+    @property
+    def compact_version(self) -> str:
+        """返回三段紧凑版本号."""
+        return self.metadata_version or self.normalized_build
+
+    @property
+    def dotted_version(self) -> str:
+        """返回四段点分版本号."""
+        return self.exe_version or _compact_to_dotted_version(self.normalized_build)
+
+    @property
+    def display_version(self) -> str:
+        """返回兼容旧接口的默认展示版本号."""
+        if self.metadata_version is not None:
+            return self.metadata_version
+        return self.dotted_version
 
 
 @dataclass(frozen=True)
@@ -86,9 +104,9 @@ class ResolvedVersion:
     def value(self) -> str:
         """返回当前显示模式下的字符串值."""
         if self.display_mode is VersionDisplayMode.LCU:
-            return self.lcu.display_version
+            return self.lcu.dotted_version
         if self.display_mode is VersionDisplayMode.GAME:
-            return self.game.display_version
+            return self.game.compact_version
         return self.patch_version
 
     def with_display_mode(self, display_mode: VersionDisplayMode) -> ResolvedVersion:
@@ -105,8 +123,8 @@ class ResolvedVersion:
 
 
 @dataclass(frozen=True)
-class LiveManifestPair:
-    """当前 live 且版本可解释的一对 LCU/GAME manifest."""
+class ResolvedManifestPair:
+    """按用户可见大区解析并匹配得到的一对 LCU/GAME manifest."""
 
     region: str
     version: ResolvedVersion
@@ -118,49 +136,86 @@ class LiveManifestPair:
     candidate_count: int
 
 
-@dataclass(frozen=True)
-class _LcuConfigRecord:
-    """LCU live 配置缓存记录."""
+# Compatibility alias; remove in v3.0.0.
+LiveManifestPair = ResolvedManifestPair
 
-    region: str
+
+@dataclass(frozen=True)
+class _RegionConfigRecord:
+    """单个用户可见大区对应的底层配置记录."""
+
+    canonical_region: str
+    patchline: str
+    lcu_config_id: str
+    launcher_region: str | None
     manifest_url: str
     manifest_id: str
     version_hint: str | None
     game_version_set: str | None
     game_artifact_type: str | None
     game_platform: str | None
+    aliases: tuple[str, ...]
 
 
-class RiotGameDataError(Exception):
-    """RiotGameData 相关错误基类."""
+# Compatibility alias; remove in v3.0.0.
+_LcuConfigRecord = _RegionConfigRecord
 
 
-class LiveConfigNotFoundError(RiotGameDataError):
-    """目标区域不存在 live 配置时抛出."""
+class LeagueManifestError(Exception):
+    """League manifest 解析相关错误基类."""
 
 
-class LcuVersionUnavailableError(RiotGameDataError):
+# Compatibility alias; remove in v3.0.0.
+RiotGameDataError = LeagueManifestError
+
+
+class RegionConfigNotFoundError(LeagueManifestError):
+    """目标大区不存在对应客户端配置时抛出."""
+
+
+# Compatibility alias; remove in v3.0.0.
+PatchlineConfigNotFoundError = RegionConfigNotFoundError
+# Compatibility alias; remove in v3.0.0.
+LiveConfigNotFoundError = RegionConfigNotFoundError
+
+
+class LcuVersionUnavailableError(LeagueManifestError):
     """无法严格解析 LCU 版本时抛出."""
 
 
-class ConsistentGameManifestNotFoundError(RiotGameDataError):
+class ConsistentGameManifestNotFoundError(LeagueManifestError):
     """无法找到满足匹配规则的 GAME manifest 时抛出."""
 
 
 DEPRECATED_LATEST_API_REMOVE_VERSION = "3.0.0"
+DEPRECATED_RIOT_GAME_DATA_ALIAS_REMOVE_VERSION = "3.0.0"
 
 
-def _warn_deprecated_latest_api(*, api_name: str, replacement: str) -> None:
+def _warn_deprecated_latest_api(*, owner_name: str, api_name: str, replacement: str) -> None:
     """发出 latest 兼容接口的弃用提示.
 
     Args:
+        owner_name: 触发该接口的类名。
         api_name: 被调用的旧接口名。
         replacement: 推荐替代调用说明。
     """
     warnings.warn(
         (
-            f"RiotGameData.{api_name}() 已弃用，计划在 v{DEPRECATED_LATEST_API_REMOVE_VERSION} 删除。"
+            f"{owner_name}.{api_name}() 已弃用，计划在 v{DEPRECATED_LATEST_API_REMOVE_VERSION} 删除。"
             f"请改用 {replacement}。"
+        ),
+        FutureWarning,
+        stacklevel=3,
+    )
+
+
+def _warn_deprecated_riot_game_data_alias() -> None:
+    """发出 `RiotGameData` 旧类名的弃用提示."""
+    warnings.warn(
+        (
+            "RiotGameData 已弃用，计划在 "
+            f"v{DEPRECATED_RIOT_GAME_DATA_ALIAS_REMOVE_VERSION} 删除。"
+            "请改用 LeagueManifestResolver。"
         ),
         FutureWarning,
         stacklevel=3,
@@ -191,29 +246,59 @@ def _run_coroutine_sync(coroutine: Any) -> Any:
     return result.get("value")
 
 
-def _build_lcu_version_info(display_version: str) -> VersionInfo:
-    """把 LCU 显示版本转换为标准版本模型."""
-    parts = display_version.split(".")
-    if len(parts) != 4 or not all(part.isdigit() for part in parts):
-        raise LcuVersionUnavailableError(f"无法解析 LCU 版本号: {display_version}")
 
+
+def _compact_to_dotted_version(compact_version: str) -> str:
+    """把三段紧凑版本号转换为四段点分版本号."""
+    parts = compact_version.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError(f"无法把紧凑版本号转换为四段格式: {compact_version}")
+
+    build = parts[2]
+    if len(build) <= 4:
+        raise ValueError(f"紧凑版本号第三段长度不足，无法拆分为 3/4 结构: {compact_version}")
+    return f"{parts[0]}.{parts[1]}.{build[:-4]}.{build[-4:]}"
+
+
+def _normalize_metadata_version(metadata_version: str) -> tuple[str, str]:
+    """标准化 metadata 版本号并返回紧凑 build 与补丁号."""
+    sanitized = metadata_version.split("+", 1)[0]
+    parts = sanitized.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ConsistentGameManifestNotFoundError(f"无法解析 GAME metadata 版本号: {metadata_version}")
+    if len(parts[2]) <= 4:
+        raise ConsistentGameManifestNotFoundError(
+            f"GAME metadata 版本号不满足 3/4 结构约束: {metadata_version}"
+        )
+    return sanitized, f"{parts[0]}.{parts[1]}"
+
+
+def _normalize_exe_version(exe_version: str) -> tuple[str, str]:
+    """标准化 exe 版本号并返回紧凑 build 与补丁号."""
+    parts = exe_version.split(".")
+    if len(parts) != 4 or not all(part.isdigit() for part in parts):
+        raise LcuVersionUnavailableError(f"无法解析 exe 版本号: {exe_version}")
+    if len(parts[3]) != 4:
+        raise LcuVersionUnavailableError(f"exe 版本号第四段不满足 4 位约束: {exe_version}")
+    return f"{parts[0]}.{parts[1]}.{parts[2]}{parts[3]}", f"{parts[0]}.{parts[1]}"
+
+def _build_lcu_version_info(exe_version: str) -> VersionInfo:
+    """把 LCU exe 版本转换为标准版本模型."""
+    compact_version, patch_version = _normalize_exe_version(exe_version)
     return VersionInfo(
-        display_version=display_version,
-        normalized_build=f"{parts[0]}.{parts[1]}.{parts[2]}{parts[3]}",
-        patch_version=f"{parts[0]}.{parts[1]}",
+        normalized_build=compact_version,
+        patch_version=patch_version,
+        exe_version=exe_version,
     )
 
 
-def _build_game_version_info(display_version: str) -> VersionInfo:
-    """把 GAME 显示版本转换为标准版本模型."""
-    parts = display_version.split(".")
-    if len(parts) < 3 or not all(part.isdigit() for part in parts):
-        raise ConsistentGameManifestNotFoundError(f"无法解析 GAME 版本号: {display_version}")
-
+def _build_game_version_info(metadata_version: str) -> VersionInfo:
+    """把 GAME metadata 版本转换为标准版本模型."""
+    compact_version, patch_version = _normalize_metadata_version(metadata_version)
     return VersionInfo(
-        display_version=display_version,
-        normalized_build=display_version,
-        patch_version=f"{parts[0]}.{parts[1]}",
+        normalized_build=compact_version,
+        patch_version=patch_version,
+        metadata_version=compact_version,
     )
 
 
@@ -331,7 +416,11 @@ class _LcuVersionResolver:
 
     @staticmethod
     def _extract_macos_version(payload: bytes) -> str:
-        """从 macOS Info.plist 中提取版本."""
+        """从 macOS Info.plist 中提取版本.
+
+        Notes:
+            这是非主要支持路径，当前主要版本提取目标仍是 Windows 客户端载体。
+        """
         plist_data = plistlib.loads(payload)
         for key in ("FileVersion", "CFBundleVersion", "CFBundleShortVersionString"):
             value = plist_data.get(key)
@@ -340,7 +429,11 @@ class _LcuVersionResolver:
         raise LcuVersionUnavailableError("无法从 Info.plist 中提取客户端版本")
 
     def _extract_patch_version_hint(self, *, manifest: PatcherManifest, temp_dir: Path) -> str | None:
-        """从 `system.yaml` 中提取补丁版本提示."""
+        """从 `system.yaml` 中提取非严格补丁提示.
+
+        Notes:
+            该路径只提供弱提示，不参与严格版本解析，后续计划删除。
+        """
         system_file = manifest.files.get("system.yaml")
         if system_file is None:
             return None
@@ -357,45 +450,114 @@ class _LcuVersionResolver:
         return match.group("patch")
 
 
-class RiotGameData:
-    """整合当前 live 的 LCU/GAME 清单信息并构造一致版本对."""
+class LeagueManifestResolver:
+    """按用户可见大区整合《英雄联盟》LCU/GAME 清单并构造一致版本对."""
 
     def __init__(self) -> None:
-        """初始化区域缓存与版本解析器."""
-        self._lcu_data: dict[str, _LcuConfigRecord] = {}
+        """初始化大区映射缓存与版本解析器."""
+        self._lcu_data: dict[str, _RegionConfigRecord] = {}
+        self._region_aliases: dict[str, str] = {}
         self._game_data: dict[str, list[ManifestRef]] = {}
         self._lcu_version_resolver = _LcuVersionResolver()
 
+    def _resolve_region_record(self, region: str) -> _RegionConfigRecord:
+        """按用户输入的大区标识解析底层配置记录."""
+        if not self._lcu_data:
+            self.load_lcu_data()
+
+        normalized_region = region.strip().upper()
+        canonical_region = self._region_aliases.get(normalized_region, normalized_region)
+        record = self._lcu_data.get(canonical_region)
+        if record is None:
+            raise RegionConfigNotFoundError(f"区域 {region} 没有可用的客户端配置")
+        return record
+
     def load_lcu_data(self) -> None:
-        """加载并解析当前 live 的 LCU 配置数据."""
+        """加载并解析所有 patchline 的 LCU 配置数据."""
         raw_data = fetch_lcu_data(url=LCU_URL)
-        self._lcu_data = {
-            region: _LcuConfigRecord(
-                region=region,
-                manifest_url=item["url"],
-                manifest_id=item["manifest_id"],
-                version_hint=item.get("version_hint") or None,
-                game_version_set=item.get("game_version_set") or None,
-                game_artifact_type=item.get("game_artifact_type") or None,
-                game_platform=item.get("game_platform") or None,
-            )
-            for region, item in raw_data.items()
-        }
+        records: dict[str, _RegionConfigRecord] = {}
+        aliases: dict[str, str] = {}
+
+        for patchline_items in raw_data.values():
+            for item in patchline_items.values():
+                canonical_region = str(item.get("canonical_region") or "").strip().upper()
+                if not canonical_region:
+                    continue
+
+                alias_values = tuple(
+                    alias.strip().upper()
+                    for alias in (item.get("region_aliases") or [])
+                    if isinstance(alias, str) and alias.strip()
+                ) or (canonical_region,)
+                record = _RegionConfigRecord(
+                    canonical_region=canonical_region,
+                    patchline=str(item.get("patchline") or "").strip().lower(),
+                    lcu_config_id=str(item.get("lcu_config_id") or "").strip().upper(),
+                    launcher_region=(
+                        str(item.get("launcher_region") or "").strip().upper() or None
+                    ),
+                    manifest_url=item["url"],
+                    manifest_id=item["manifest_id"],
+                    version_hint=item.get("version_hint") or None,
+                    game_version_set=(
+                        str(item.get("game_version_set") or "").strip().upper() or None
+                    ),
+                    game_artifact_type=item.get("game_artifact_type") or None,
+                    game_platform=item.get("game_platform") or None,
+                    aliases=alias_values,
+                )
+                records[canonical_region] = record
+                for alias in alias_values:
+                    existing_region = aliases.get(alias)
+                    if existing_region is not None and existing_region != canonical_region:
+                        logger.warning(
+                            "区域别名 {} 同时命中 {} 与 {}，保留 {}",
+                            alias,
+                            existing_region,
+                            canonical_region,
+                            existing_region,
+                        )
+                        continue
+                    aliases[alias] = canonical_region
+
+        self._lcu_data = records
+        self._region_aliases = aliases
 
     def load_game_data(self, regions: list[str] | None = None) -> None:
-        """加载并解析指定 version-set 的 GAME 候选数据."""
+        """加载并解析指定大区的 GAME 候选数据."""
         regions = regions or ["EUW1", "PBE1"]
-        logger.debug("正在加载 GAME 数据，区域={}", regions)
+        logger.debug("正在加载 GAME 数据，大区={}", regions)
 
         for region in regions:
+            normalized_region = region.strip().upper()
+            record = None
+            if self._lcu_data:
+                try:
+                    record = self._resolve_region_record(region)
+                except RegionConfigNotFoundError:
+                    record = None
+
+            if record is None:
+                canonical_region = normalized_region
+                version_set = normalized_region
+                artifact_type = "lol-game-client"
+                artifact_platform = "windows"
+            else:
+                canonical_region = record.canonical_region
+                version_set = record.game_version_set or canonical_region
+                artifact_type = record.game_artifact_type or "lol-game-client"
+                artifact_platform = record.game_platform or "windows"
+
             releases = fetch_game_data(
-                region=region,
+                region=version_set,
                 url_template=GAME_URL_TEMPLATE,
+                artifact_type=artifact_type,
+                platform=artifact_platform,
             )
-            self._game_data[region] = [
+            self._game_data[canonical_region] = [
                 ManifestRef(
                     artifact_group="game",
-                    region=region,
+                    region=canonical_region,
                     source="sieve",
                     url=item["url"],
                     manifest_id=extract_manifest_id(item["url"]),
@@ -405,46 +567,54 @@ class RiotGameData:
             ]
 
     def latest_lcu(self, region: str = "EUW") -> dict[str, str] | None:
-        """获取指定区域当前 live LCU 配置的兼容视图.
+        """获取指定大区当前 LCU 配置的兼容视图.
 
         Deprecated:
             该兼容接口计划在 `v3.0.0` 删除。请改用
-            `resolve_live_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`
-            或 `get_live_lcu_manifest(...)`。
+            `resolve_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)`
+            或 `get_lcu_manifest(region)`。
         """
         _warn_deprecated_latest_api(
+            owner_name=self.__class__.__name__,
             api_name="latest_lcu",
             replacement=(
-                "resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)"
-                " 或 get_live_lcu_manifest(region)"
+                "resolve_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)"
+                " 或 get_lcu_manifest(region)"
             ),
         )
-        if not self._lcu_data:
-            self.load_lcu_data()
-
-        record = self._lcu_data.get(region)
-        if record is None:
+        try:
+            record = self._resolve_region_record(region)
+        except RegionConfigNotFoundError:
             return None
         return {
             "version": record.version_hint or "",
             "url": record.manifest_url,
         }
 
-    def latest_game(self, region: str = "EUW1") -> dict[str, str] | None:
-        """获取指定 version-set 下版本号最大的 GAME 候选.
+    def latest_game(self, region: str = "EUW") -> dict[str, str] | None:
+        """获取指定大区下版本号最大的 GAME 候选.
 
         Deprecated:
             该兼容接口计划在 `v3.0.0` 删除。请改用
-            `resolve_live_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`。
+            `resolve_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)`。
         """
         _warn_deprecated_latest_api(
+            owner_name=self.__class__.__name__,
             api_name="latest_game",
-            replacement="resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)",
+            replacement="resolve_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)",
         )
-        if region not in self._game_data:
-            self.load_game_data(regions=[region])
+        resolved_region = region.strip().upper()
+        releases = self._game_data.get(resolved_region)
+        if releases is None:
+            try:
+                releases = self.list_game_candidates(region)
+            except RegionConfigNotFoundError:
+                if resolved_region not in self._game_data:
+                    self.load_game_data(regions=[resolved_region])
+                releases = self._game_data.get(resolved_region, [])
+            else:
+                resolved_region = self._resolve_region_record(region).canonical_region
 
-        releases = self._game_data.get(region)
         if not releases:
             return None
         latest = _select_highest_game_candidate(releases)
@@ -455,66 +625,56 @@ class RiotGameData:
             "url": latest.url,
         }
 
-    def get_live_lcu_manifest(self, region: str = "EUW") -> ManifestRef:
-        """返回当前 live 配置中的 LCU manifest 引用.
+    def get_lcu_manifest(self, region: str = "EUW") -> ManifestRef:
+        """返回指定大区当前 LCU 配置中的 manifest 引用.
 
         Args:
-            region: LCU 区域标识，例如 `EUW`。
+            region: 用户可见的大区标识，例如 `EUW`、`EUW1` 或 `PBE`。
 
         Returns:
-            当前 live LCU manifest 引用。
+            当前大区对应的 LCU manifest 引用。
 
         Raises:
-            LiveConfigNotFoundError: 当目标区域不存在 live 配置时抛出。
+            RegionConfigNotFoundError: 当目标大区不存在对应配置时抛出。
         """
-        if not self._lcu_data:
-            self.load_lcu_data()
-
-        record = self._lcu_data.get(region)
-        if record is None:
-            raise LiveConfigNotFoundError(f"区域 {region} 没有可用的 live LCU 配置")
+        record = self._resolve_region_record(region)
 
         return ManifestRef(
             artifact_group="lcu",
-            region=record.region,
+            region=record.canonical_region,
             source="clientconfig",
             url=record.manifest_url,
             manifest_id=record.manifest_id,
             version=None,
         )
 
-    def list_live_game_candidates(self, region: str = "EUW") -> list[ManifestRef]:
-        """列出当前 live 配置对应的 GAME 候选集合.
+    def list_game_candidates(self, region: str = "EUW") -> list[ManifestRef]:
+        """列出指定大区对应的 GAME 候选集合.
 
         Args:
-            region: LCU 区域标识，例如 `EUW`。
+            region: 用户可见的大区标识，例如 `EUW`、`EUW1` 或 `PBE`。
 
         Returns:
-            当前 live 配置对应的 GAME manifest 候选列表。
+            该大区关联的 GAME manifest 候选列表。
 
         Raises:
-            LiveConfigNotFoundError: 当目标区域不存在 live 配置时抛出。
+            RegionConfigNotFoundError: 当目标大区不存在对应配置时抛出。
         """
-        if not self._lcu_data:
-            self.load_lcu_data()
-
-        record = self._lcu_data.get(region)
-        if record is None:
-            raise LiveConfigNotFoundError(f"区域 {region} 没有可用的 live LCU 配置")
+        record = self._resolve_region_record(region)
         if not record.game_version_set:
-            raise LiveConfigNotFoundError(f"区域 {region} 缺少可用的 GAME patchsieve 配置")
+            raise RegionConfigNotFoundError(f"区域 {region} 缺少可用的 GAME version-set")
 
-        if record.game_version_set not in self._game_data:
+        if record.canonical_region not in self._game_data:
             releases = fetch_game_data(
                 region=record.game_version_set,
                 url_template=GAME_URL_TEMPLATE,
                 artifact_type=record.game_artifact_type or "lol-game-client",
                 platform=record.game_platform or "windows",
             )
-            self._game_data[record.game_version_set] = [
+            self._game_data[record.canonical_region] = [
                 ManifestRef(
                     artifact_group="game",
-                    region=record.game_version_set,
+                    region=record.canonical_region,
                     source="sieve",
                     url=item["url"],
                     manifest_id=extract_manifest_id(item["url"]),
@@ -523,28 +683,28 @@ class RiotGameData:
                 for item in releases
             ]
 
-        return list(self._game_data[record.game_version_set])
+        return list(self._game_data[record.canonical_region])
 
-    def resolve_live_manifest_pair(
+    def resolve_manifest_pair(
         self,
         region: str = "EUW",
         *,
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         version_display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
-    ) -> LiveManifestPair:
-        """解析当前 live 且版本规则明确的一对 LCU/GAME manifest.
+    ) -> ResolvedManifestPair:
+        """解析指定大区当前版本规则明确的一对 LCU/GAME manifest.
 
         Args:
-            region: LCU 区域标识，例如 `EUW`。
+            region: 用户可见的大区标识，例如 `EUW`、`EUW1` 或 `PBE`。
             match_mode: 版本匹配模式。`strict` 需要 build 完全一致；
                 `ignore_revision` 允许只按 `major.minor` 匹配。
             version_display_mode: 统一版本号的默认显示模式。
 
         Returns:
-            当前 live 的一致 manifest 对。
+            指定大区解析出的 manifest 对。
 
         Raises:
-            LiveConfigNotFoundError: 当目标区域不存在有效 live 配置时抛出。
+            RegionConfigNotFoundError: 当目标大区不存在有效配置时抛出。
             LcuVersionUnavailableError: 当无法解析 LCU 精确版本时抛出。
             ConsistentGameManifestNotFoundError: 当找不到满足规则的 GAME 清单时抛出。
         """
@@ -553,7 +713,9 @@ class RiotGameData:
         if isinstance(version_display_mode, str):
             version_display_mode = VersionDisplayMode(version_display_mode)
 
-        lcu_manifest = self.get_live_lcu_manifest(region)
+        record = self._resolve_region_record(region)
+        resolved_region = record.canonical_region
+        lcu_manifest = self.get_lcu_manifest(region)
         lcu_version = self._lcu_version_resolver.resolve(lcu_manifest.url)
         lcu_manifest = ManifestRef(
             artifact_group=lcu_manifest.artifact_group,
@@ -564,7 +726,7 @@ class RiotGameData:
             version=lcu_version,
         )
 
-        candidates = self.list_live_game_candidates(region)
+        candidates = self.list_game_candidates(region)
         exact_matches = [
             candidate
             for candidate in candidates
@@ -575,8 +737,8 @@ class RiotGameData:
                 exact_matches,
                 key=lambda item: version_key(item.version.display_version if item.version else ""),
             )
-            return LiveManifestPair(
-                region=region,
+            return ResolvedManifestPair(
+                region=resolved_region,
                 version=ResolvedVersion(
                     lcu=lcu_version,
                     game=selected.version,
@@ -592,7 +754,8 @@ class RiotGameData:
 
         if match_mode is VersionMatchMode.STRICT:
             raise ConsistentGameManifestNotFoundError(
-                f"区域 {region} 未找到与 LCU build {lcu_version.normalized_build} 完全一致的 GAME manifest"
+                f"区域 {resolved_region} 未找到与 LCU build "
+                f"{lcu_version.normalized_build} 完全一致的 GAME manifest"
             )
 
         patch_matches = [
@@ -602,13 +765,13 @@ class RiotGameData:
         ]
         if not patch_matches:
             raise ConsistentGameManifestNotFoundError(
-                f"区域 {region} 未找到与补丁版本 {lcu_version.patch_version} 一致的 GAME manifest"
+                f"区域 {resolved_region} 未找到与补丁版本 {lcu_version.patch_version} 一致的 GAME manifest"
             )
 
         if match_mode is VersionMatchMode.PATCH_LATEST:
             selected = _select_highest_game_candidate(patch_matches)
-            return LiveManifestPair(
-                region=region,
+            return ResolvedManifestPair(
+                region=resolved_region,
                 version=ResolvedVersion(
                     lcu=lcu_version,
                     game=selected.version,
@@ -637,14 +800,13 @@ class RiotGameData:
         ]
         if not compatible_patch_matches:
             raise ConsistentGameManifestNotFoundError(
-                "区域 "
-                f"{region} 在补丁 {lcu_version.patch_version} 下没有不高于 "
+                f"区域 {resolved_region} 在补丁 {lcu_version.patch_version} 下没有不高于 "
                 f"LCU build {lcu_version.normalized_build} 的 GAME manifest"
             )
 
         selected = _select_highest_game_candidate(compatible_patch_matches)
-        return LiveManifestPair(
-            region=region,
+        return ResolvedManifestPair(
+            region=resolved_region,
             version=ResolvedVersion(
                 lcu=lcu_version,
                 game=selected.version,
@@ -653,20 +815,22 @@ class RiotGameData:
             lcu=lcu_manifest,
             game=selected,
             match_mode=match_mode,
-            is_exact_match=bool(selected.version and selected.version.normalized_build == lcu_version.normalized_build),
+            is_exact_match=bool(
+                selected.version and selected.version.normalized_build == lcu_version.normalized_build
+            ),
             match_reason="ignore_revision_fallback",
             candidate_count=len(candidates),
         )
 
-    def resolve_live_version(
+    def resolve_version(
         self,
         region: str = "EUW",
         *,
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
     ) -> ResolvedVersion:
-        """返回当前 live 的统一版本号对象."""
-        pair = self.resolve_live_manifest_pair(
+        """返回指定大区的统一版本号对象."""
+        pair = self.resolve_manifest_pair(
             region=region,
             match_mode=match_mode,
             version_display_mode=display_mode,
@@ -680,8 +844,8 @@ class RiotGameData:
         manifest_path: StrPath = "",
         **extractor_kwargs: Any,
     ) -> WADExtractor:
-        """为指定 LCU 区域构造 WADExtractor。."""
-        lcu_manifest = self.get_live_lcu_manifest(region)
+        """为指定大区的 LCU 配置构造 WADExtractor."""
+        lcu_manifest = self.get_lcu_manifest(region)
         manifest = PatcherManifest(file=lcu_manifest.url, path=manifest_path)
         return WADExtractor(manifest, **extractor_kwargs)
 
@@ -693,17 +857,30 @@ class RiotGameData:
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         **extractor_kwargs: Any,
     ) -> WADExtractor:
-        """为指定区域当前 live 的一致 GAME manifest 构造 WADExtractor."""
-        pair = self.resolve_live_manifest_pair(region, match_mode=match_mode)
+        """为指定大区的一致 GAME manifest 构造 WADExtractor."""
+        pair = self.resolve_manifest_pair(region, match_mode=match_mode)
         manifest = PatcherManifest(file=pair.game.url, path=manifest_path)
         return WADExtractor(manifest, **extractor_kwargs)
 
-    def available_lcu_regions(self) -> list[str]:
-        """返回当前可用 LCU 区域列表."""
+    def available_regions(self) -> list[str]:
+        """返回当前可用的用户可见大区列表."""
         if not self._lcu_data:
             self.load_lcu_data()
         return sorted(self._lcu_data.keys())
 
+    def available_lcu_regions(self) -> list[str]:
+        """兼容旧方法名，计划在 `v3.0.0` 删除."""
+        return self.available_regions()
+
     def available_game_regions(self) -> list[str]:
-        """返回当前缓存中的 GAME version-set 列表."""
+        """返回当前缓存中的 GAME 候选大区列表."""
         return sorted(self._game_data.keys())
+
+
+class RiotGameData(LeagueManifestResolver):
+    """`LeagueManifestResolver` 的兼容旧名，计划在 `v3.0.0` 删除."""
+
+    def __init__(self) -> None:
+        """初始化兼容旧名实例，并发出弃用提示."""
+        _warn_deprecated_riot_game_data_alias()
+        super().__init__()

@@ -2,43 +2,53 @@
 
 ![](https://img.shields.io/badge/python-%3E%3D3.10-blue)
 
-本文档不再承担“所有内容堆在一个文件里”的角色，而是作为文档导航页使用。
+本文档是导航页，帮助你按任务找到对应说明。
 
-如果你是第一次接触项目，建议按这个顺序阅读：
+## 推荐阅读顺序
 
-1. [README.md](../README.md)：最快理解项目能做什么、怎么开始用、有哪些实践建议
-2. [manifest.md](./manifest.md)：Manifest 下载主线
-3. [extractor.md](./extractor.md)：WAD 按需提取
-4. [diff.md](./diff.md)：Manifest / WAD 差异分析与 BIN 路径回填
-5. [game.md](./game.md)：`RiotGameData`、live 一致对、版本对象与错误语义
-6. [TESTING.md](./TESTING.md)：测试脚本、验证方式与基准说明
+1. `README.md`
+   - 先看项目能做什么、怎么开始
+2. `docs/manifest.md`
+   - Manifest 下载主线
+3. `docs/extractor.md`
+   - WAD 按需提取
+4. `docs/diff.md`
+   - Manifest / WAD 差异分析与 BIN 路径回填
+5. `docs/game.md`
+   - `LeagueManifestResolver`、`LeagueManifestInspector`、区域语义、版本对象与兼容层
+6. `docs/TESTING.md`
+   - 测试、验证方式与基准说明
 
 ## 按任务选文档
 
 ### 我只想尽快开始用
 
-- 先看 [README.md](../README.md)
+- 看 `README.md`
 
 ### 我只想下载 manifest 里的文件
 
-- 看 [manifest.md](./manifest.md)
+- 看 `docs/manifest.md`
 
 ### 我只想从 WAD 中提取少量资源
 
-- 看 [extractor.md](./extractor.md)
+- 看 `docs/extractor.md`
 
 ### 我想比较两个版本的差异
 
-- 看 [diff.md](./diff.md)
+- 看 `docs/diff.md`
 
-### 我想拿到当前 live 且版本规则明确的一对 LCU/GAME manifest
+### 我想拿到某个 LoL 区域当前可用的一对 LCU/GAME manifest
 
-- 看 [game.md](./game.md)
-- 其中 live 场景示例默认显式使用 `VersionMatchMode.IGNORE_REVISION`
+- 看 `docs/game.md`
+- 公开入口统一只传一个 `region`
+- 默认推荐 `VersionMatchMode.IGNORE_REVISION`
+
+### 我想判断一个或两个 manifest 的类型与版本
+
+- 看 `docs/game.md`
+- `LeagueManifestInspector` 支持单清单识别和双清单配对
 
 ## 包根导出一览
-
-当前 `riotmanifest` 根包主要按以下功能导出对象：
 
 ### Manifest 下载主线
 
@@ -72,34 +82,38 @@
 - `WADPathProvider`
 - `ManifestBinPathProvider`
 
-### RiotGameData 与版本对象
+### LoL manifest 解析与检查
 
-- `RiotGameData`
+主接口：
+
+- `LeagueManifestResolver`
+- `LeagueManifestInspector`
+- `RegionConfigNotFoundError`
+- `LcuVersionUnavailableError`
+- `ConsistentGameManifestNotFoundError`
+- `ManifestInspectionError`
 - `VersionMatchMode`
 - `VersionDisplayMode`
 - `VersionInfo`
 - `ManifestRef`
 - `ResolvedVersion`
-- `LiveManifestPair`
+- `ResolvedManifestPair`
+
+兼容层：
+
+- `RiotGameData`
 - `RiotGameDataError`
+- `PatchlineConfigNotFoundError`
 - `LiveConfigNotFoundError`
-- `LcuVersionUnavailableError`
-- `ConsistentGameManifestNotFoundError`
+- `LiveManifestPair`
 
-### 其他基础对象
-
-- `BinaryParser`
-- `HttpClientError`
+以上兼容层当前仍导出，但都计划在 `v3.0.0` 删除。
 
 ## 文档划分原则
 
-本轮文档重构采用两层结构：
-
 - `README.md`
-  - 只放最快理解项目与最快上手所需内容
-  - 同时保留高频实践建议
+  - 放最快理解项目与最快上手所需内容
 - `docs/*.md`
-  - 按功能拆分
-  - 对常量、类、函数、返回对象、错误语义和调用策略做详细说明
+  - 按功能拆分，说明公开对象、返回类型、错误语义与调用建议
 
-如果后续继续扩展功能，应优先把内容落到对应功能文档，而不是重新堆回导航页。
+后续如继续扩展，请优先把说明补到对应功能文档，而不是重新堆回导航页。

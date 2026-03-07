@@ -160,6 +160,7 @@ cython_debug/
 .idea/
 .vscode/
 .ai_memory/
+.serena/
 .CODING_STYLE.md
 out/
 out

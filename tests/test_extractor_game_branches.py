@@ -5,10 +5,10 @@ import pytest
 
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import (
-    LiveConfigNotFoundError,
-    RiotGameData,
+    LeagueManifestResolver,
+    RegionConfigNotFoundError,
 )
-from riotmanifest.game.metadata import first_value, parse_game_release, version_key
+from riotmanifest.game.metadata import fetch_game_data, first_value, parse_game_release, version_key
 from riotmanifest.manifest import DecompressError, DownloadError, PatcherBundle, PatcherFile, PatcherManifest
 
 
@@ -507,12 +507,35 @@ def test_parse_game_release_filters_invalid_inputs(release):
     assert parse_game_release(release) is None
 
 
+def test_fetch_game_data_adds_server_side_filters(monkeypatch):
+    captured = {}
+
+    def _fake_http_get_json(url: str):
+        captured["url"] = url
+        return {
+            "releases": [
+                _make_game_release("14.2.1234501+meta", "https://example.invalid/kr-1421.manifest"),
+            ]
+        }
+
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+
+    result = fetch_game_data("KR", published=True)
+
+    assert result == [{"version": "14.2.1234501", "url": "https://example.invalid/kr-1421.manifest"}]
+    assert "version-sets/KR" in captured["url"]
+    assert "q%5Bartifact_type_id%5D=lol-game-client" in captured["url"]
+    assert "q%5Bplatform%5D=windows" in captured["url"]
+    assert "q%5Bpublished%5D=true" in captured["url"]
+
+
 def test_load_lcu_data_non_dict_response(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: [])
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_lcu_data()
 
+    assert data.available_regions() == []
     assert data.available_lcu_regions() == []
 
 
@@ -537,17 +560,33 @@ def test_load_lcu_data_skips_invalid_configs(monkeypatch):
                         ]
                     }
                 }
-            }
+            },
+            "league.pbe": {
+                "platforms": {
+                    "win": {
+                        "configurations": [
+                            {
+                                "id": "PBE",
+                                "patch_url": "https://example.invalid/pbe.manifest",
+                                "metadata": {"theme_manifest": "https://example.invalid/releases/14.4.1/theme/pbe"},
+                            },
+                        ]
+                    }
+                }
+            },
         }
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_lcu_data()
 
-    with pytest.warns(FutureWarning, match="latest_lcu\\(\\) 已弃用"):
+    with pytest.warns(FutureWarning, match=r"latest_lcu\(\) 已弃用"):
         assert data.latest_lcu("EUW") == {"version": "14.4.1", "url": "https://example.invalid/euw.manifest"}
-
+    with pytest.warns(FutureWarning, match=r"latest_lcu\(\) 已弃用"):
+        assert data.latest_lcu("PBE") == {"version": "14.4.1", "url": "https://example.invalid/pbe.manifest"}
+    assert data.available_regions() == ["A", "B", "EUW", "PBE"]
+    assert data.available_lcu_regions() == ["A", "B", "EUW", "PBE"]
 
 def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch):
     def _fake_http_get_json(url: str):
@@ -555,7 +594,7 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
             return {
                 "releases": [
                     123,
-                    _make_game_release("14.2.1+meta", "https://example.invalid/kr-1421.manifest"),
+                    _make_game_release("14.2.1234501+meta", "https://example.invalid/kr-1421.manifest"),
                 ]
             }
         return {
@@ -564,17 +603,101 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
 
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
 
-    data = RiotGameData()
+    data = LeagueManifestResolver()
     data.load_game_data(regions=["KR", "EUW1"])
 
     with pytest.warns(FutureWarning, match="latest_game\\(\\) 已弃用"):
-        assert data.latest_game("KR") == {"version": "14.2.1", "url": "https://example.invalid/kr-1421.manifest"}
+        assert data.latest_game("KR") == {"version": "14.2.1234501", "url": "https://example.invalid/kr-1421.manifest"}
     assert data.available_game_regions() == ["EUW1", "KR"]
 
 
 def test_build_lcu_extractor_requires_live_region(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: {})
 
-    data = RiotGameData()
-    with pytest.raises(LiveConfigNotFoundError, match="EUW"):
+    data = LeagueManifestResolver()
+    with pytest.raises(RegionConfigNotFoundError, match="EUW"):
         data.build_lcu_extractor("EUW")
+
+
+def test_metadata_helper_normalizes_region_alias_inputs() -> None:
+    import riotmanifest.game.metadata as game_metadata
+
+    raw_aliases = ["BR1", "br1", 123]
+
+    assert game_metadata._extract_patchline_id(123) is None
+    assert game_metadata._extract_patchline_id("league.live") == "live"
+    assert game_metadata._extract_patchline_id("   ") is None
+    assert game_metadata._extract_launcher_region("--region=BR") is None
+    assert game_metadata._extract_launcher_region([1, "--locale=pt_BR", "--region=", "--region=BR"]) == "BR"
+    assert game_metadata._collect_region_aliases(
+        " br ",
+        "BR",
+        None,
+        "",
+        extra_aliases=raw_aliases,
+    ) == ["BR", "BR1"]
+
+
+def test_load_lcu_data_supports_version_set_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_http_get_json(url: str):
+        assert "clientconfig.rpg.riotgames.com" in url
+        return {
+            1: {
+                "platforms": {
+                    "win": {
+                        "configurations": [
+                            {
+                                "id": "IGNORED",
+                                "patch_url": "https://example.invalid/ignored.manifest",
+                            }
+                        ]
+                    }
+                }
+            },
+            "league.live": {
+                "platforms": {
+                    "win": {
+                        "configurations": [
+                            {
+                                "id": "BR",
+                                "patch_url": "https://example.invalid/br.manifest",
+                                "metadata": {
+                                    "theme_manifest": "https://example.invalid/releases/16.5.1/theme/data"
+                                },
+                                "region_data": {
+                                    "default_region": "BR",
+                                    "available_regions": ["BR", "BR1"],
+                                },
+                                "launcher": {
+                                    "arguments": [123, "--locale=pt_BR", "--region=BR"],
+                                },
+                                "patch_artifacts": [
+                                    {
+                                        "id": "game_client",
+                                        "type": "patchsieve",
+                                        "patchsieve": {
+                                            "version_set": "BR1",
+                                            "parameters": {
+                                                "artifact_type_id": "lol-game-client",
+                                                "platform": "windows",
+                                            },
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+
+    resolver = LeagueManifestResolver()
+    resolver.load_lcu_data()
+
+    manifest = resolver.get_lcu_manifest("BR1")
+
+    assert manifest.region == "BR"
+    assert manifest.url == "https://example.invalid/br.manifest"
+    assert resolver.available_regions() == ["BR"]

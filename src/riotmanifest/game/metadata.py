@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from loguru import logger
 
@@ -13,7 +13,7 @@ from riotmanifest.utils.http_client import http_get_json
 PATCHLINES_URL = (
     "https://clientconfig.rpg.riotgames.com/api/v1/config/public?namespace=keystone.products.league_of_legends.patchlines"
 )
-VERSION_SET_URL_TEMPLATE = "https://sieve.services.riotcdn.net/api/v1/products/lol/version-sets/{region}?q[platform]=windows"
+VERSION_SET_URL_TEMPLATE = "https://sieve.services.riotcdn.net/api/v1/products/lol/version-sets/{region}"
 
 # 兼容旧命名，后续内部实现统一使用更贴近语义的常量名。
 LCU_URL = PATCHLINES_URL
@@ -94,16 +94,77 @@ def parse_game_release(
     return {"version": version_raw.split("+", 1)[0], "url": download_url}
 
 
-def fetch_lcu_data(*, url: str = LCU_URL) -> dict[str, dict[str, str]]:
-    """从 LCU 接口拉取并返回区域到版本信息映射."""
+def _extract_patchline_id(namespace_key: str) -> str | None:
+    """从 clientconfig namespace 键中提取 patchline 标识."""
+    if not isinstance(namespace_key, str):
+        return None
+    patchline_id = namespace_key.rsplit(".", maxsplit=1)[-1].strip()
+    return patchline_id or None
+
+
+def _build_game_data_url(
+    *,
+    region: str,
+    url_template: str,
+    artifact_type: str,
+    platform: str,
+    published: bool | None,
+) -> str:
+    """构造带筛选参数的 GAME version-set 请求地址."""
+    parsed_url = urlparse(url_template.format(region=region))
+    query_params = dict(parse_qsl(parsed_url.query, keep_blank_values=True))
+    query_params["q[artifact_type_id]"] = artifact_type
+    query_params["q[platform]"] = platform
+    if published is not None:
+        query_params["q[published]"] = str(published).lower()
+    return urlunparse(parsed_url._replace(query=urlencode(query_params)))
+
+
+def _extract_launcher_region(arguments: Any) -> str | None:
+    """从启动参数中提取 `--region=` 指定的大区标识."""
+    if not isinstance(arguments, list):
+        return None
+
+    for argument in arguments:
+        if not isinstance(argument, str):
+            continue
+        if argument.startswith("--region="):
+            region = argument.split("=", maxsplit=1)[-1].strip()
+            if region:
+                return region
+    return None
+
+
+def _collect_region_aliases(*aliases: str | None, extra_aliases: list[str] | None = None) -> list[str]:
+    """汇总并去重同一条配置可识别的大区别名."""
+    ordered_aliases: list[str] = []
+    seen: set[str] = set()
+    for alias in [*aliases, *(extra_aliases or [])]:
+        if not isinstance(alias, str):
+            continue
+        normalized_alias = alias.strip().upper()
+        if not normalized_alias or normalized_alias in seen:
+            continue
+        ordered_aliases.append(normalized_alias)
+        seen.add(normalized_alias)
+    return ordered_aliases
+
+
+def fetch_lcu_data(*, url: str = LCU_URL) -> dict[str, dict[str, dict[str, Any]]]:
+    """从 LCU 接口拉取并返回 patchline 到配置映射."""
     logger.debug("正在加载 LCU 数据")
     data = http_get_json(url)
     if not isinstance(data, dict):
         logger.warning("LCU 接口返回异常数据类型: {}", type(data))
         return {}
 
-    lcu_data: dict[str, dict[str, str]] = {}
-    for patchline in data.values():
+    lcu_data: dict[str, dict[str, dict[str, Any]]] = {}
+    for patchline_key, patchline in data.items():
+        patchline_id = _extract_patchline_id(patchline_key)
+        if patchline_id is None:
+            continue
+
+        patchline_configs: dict[str, dict[str, Any]] = {}
         platforms = (patchline or {}).get("platforms") or {}
         win_data = platforms.get("win") or {}
         for config in win_data.get("configurations") or []:
@@ -112,6 +173,17 @@ def fetch_lcu_data(*, url: str = LCU_URL) -> dict[str, dict[str, str]]:
             theme_manifest = ((config.get("metadata") or {}).get("theme_manifest")) or ""
             if not config_id or not patch_url:
                 continue
+
+            region_data = config.get("region_data") or {}
+            default_region = region_data.get("default_region")
+            available_regions = [
+                region
+                for region in (region_data.get("available_regions") or [])
+                if isinstance(region, str)
+            ]
+            launcher_region = _extract_launcher_region(
+                ((config.get("launcher") or {}).get("arguments")) or []
+            )
 
             game_version_set = ""
             game_artifact_type = ""
@@ -136,16 +208,41 @@ def fetch_lcu_data(*, url: str = LCU_URL) -> dict[str, dict[str, str]]:
                     game_platform = platform
                 break
 
-            lcu_data[str(config_id)] = {
+            canonical_region = (
+                (default_region if isinstance(default_region, str) else "")
+                or launcher_region
+                or str(config_id)
+                or game_version_set
+            )
+            region_aliases = _collect_region_aliases(
+                str(config_id),
+                default_region if isinstance(default_region, str) else None,
+                launcher_region,
+                game_version_set or None,
+                extra_aliases=available_regions,
+            )
+            patchline_configs[str(config_id)] = {
+                "patchline": patchline_id,
+                "canonical_region": canonical_region.upper(),
+                "lcu_config_id": str(config_id).upper(),
+                "launcher_region": launcher_region.upper() if launcher_region else "",
                 "url": str(patch_url),
                 "version_hint": extract_theme_patch_version(theme_manifest) or "",
                 "manifest_id": extract_manifest_id(str(patch_url)),
-                "game_version_set": game_version_set,
+                "game_version_set": game_version_set.upper(),
                 "game_artifact_type": game_artifact_type,
                 "game_platform": game_platform,
+                "region_aliases": region_aliases,
             }
 
-    logger.debug("LCU 数据加载完成，可用区域数量={}", len(lcu_data))
+        if patchline_configs:
+            lcu_data[patchline_id] = patchline_configs
+
+    logger.debug(
+        "LCU 数据加载完成，patchline 数量={}，配置数量={}",
+        len(lcu_data),
+        sum(len(configs) for configs in lcu_data.values()),
+    )
     return lcu_data
 
 
@@ -155,6 +252,7 @@ def fetch_game_data(
     url_template: str = GAME_URL_TEMPLATE,
     artifact_type: str = "lol-game-client",
     platform: str = "windows",
+    published: bool | None = None,
 ) -> list[dict[str, str]]:
     """从 GAME 接口拉取并返回给定区域的候选版本列表.
 
@@ -163,11 +261,18 @@ def fetch_game_data(
         url_template: 请求地址模板。
         artifact_type: 目标 artifact 类型。
         platform: 目标平台。
+        published: 是否只请求已发布条目；`None` 表示不附加该筛选。
 
     Returns:
         匹配目标条件的候选列表。
     """
-    url = url_template.format(region=region)
+    url = _build_game_data_url(
+        region=region,
+        url_template=url_template,
+        artifact_type=artifact_type,
+        platform=platform,
+        published=published,
+    )
     data = http_get_json(url)
     releases = data.get("releases", []) if isinstance(data, dict) else []
 
