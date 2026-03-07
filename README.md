@@ -87,8 +87,8 @@ wad_report = diff_wad_headers(manifest_report=manifest_report)
 ```python
 from riotmanifest import LeagueManifestResolver
 
-rgd = LeagueManifestResolver()
-pair = rgd.resolve_live_manifest_pair("EUW")
+resolver = LeagueManifestResolver()
+pair = resolver.resolve_manifest_pair("EUW")
 
 print(str(pair.version))  # 例如 16.5
 print(pair.lcu.url)

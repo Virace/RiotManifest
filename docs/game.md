@@ -13,9 +13,9 @@
 `LeagueManifestResolver` 当前不是“完整历史版本管理器”。  
 它的职责已经收敛为：
 
-- 从 Riot 官方当前 live 配置中定位 LCU manifest
-- 找到当前 live 对应的 GAME 候选集合
-- 按规则构造“当前 live 且版本规则明确”的一对 LCU/GAME manifest
+- 从 Riot 官方当前 patchline 配置中定位 LCU manifest
+- 找到当前 patchline 对应的 GAME 候选集合
+- 按规则构造“当前 patchline 且版本规则明确”的一对 LCU/GAME manifest
 - 提供统一版本号对象
 
 ## 兼容说明
@@ -184,7 +184,7 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 
 ## `LeagueManifestResolver` 公开方法
 
-### `get_live_lcu_manifest(region="EUW")`
+### `get_lcu_manifest(region="EUW")`
 
 返回：
 
@@ -192,9 +192,9 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 
 用途：
 
-- 只拿当前 live LCU manifest，不关心 GAME
+- 只拿当前 patchline 的 LCU manifest，不关心 GAME
 
-### `list_live_game_candidates(region="EUW")`
+### `list_game_candidates(region="EUW")`
 
 返回：
 
@@ -202,14 +202,14 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 
 用途：
 
-- 只看当前 live 对应的 GAME 候选集合
+- 只看当前 patchline 对应的 GAME 候选集合
 
-### `resolve_live_manifest_pair(...)`
+### `resolve_manifest_pair(...)`
 
 签名重点：
 
 ```python
-resolve_live_manifest_pair(
+resolve_manifest_pair(
     region="EUW",
     match_mode=VersionMatchMode.IGNORE_REVISION,
     version_display_mode=VersionDisplayMode.IGNORE_REVISION,
@@ -228,12 +228,12 @@ resolve_live_manifest_pair(
 - 如果你只处理资源文件，大多数情况下可以直接不传 `match_mode`。
 - 原因是 Riot live 经常先推进 GAME，再稍后推进 LCU；而 `patchsieve` 只保留当前滚动窗口中的少量 GAME 候选，不是完整历史库。
 
-### `resolve_live_version(...)`
+### `resolve_version(...)`
 
 签名重点：
 
 ```python
-resolve_live_version(
+resolve_version(
     region="EUW",
     match_mode=VersionMatchMode.IGNORE_REVISION,
     display_mode=VersionDisplayMode.IGNORE_REVISION,
@@ -373,8 +373,8 @@ resolve_live_version(
 ```python
 from riotmanifest import LeagueManifestResolver
 
-rgd = LeagueManifestResolver()
-pair = rgd.resolve_live_manifest_pair("EUW")
+resolver = LeagueManifestResolver()
+pair = resolver.resolve_manifest_pair("EUW")
 
 print(pair.lcu.url)
 print(pair.game.url)
@@ -385,8 +385,8 @@ print(pair.game.url)
 ```python
 from riotmanifest import LeagueManifestResolver
 
-rgd = LeagueManifestResolver()
-version = rgd.resolve_live_version("EUW")
+resolver = LeagueManifestResolver()
+version = resolver.resolve_version("EUW")
 print(str(version))  # 16.5
 ```
 
@@ -395,8 +395,8 @@ print(str(version))  # 16.5
 ```python
 from riotmanifest import LeagueManifestResolver, VersionDisplayMode
 
-rgd = LeagueManifestResolver()
-version = rgd.resolve_live_version("EUW")
+resolver = LeagueManifestResolver()
+version = resolver.resolve_version("EUW")
 
 print(version.with_display_mode(VersionDisplayMode.LCU))
 print(version.with_display_mode(VersionDisplayMode.GAME))
@@ -407,8 +407,8 @@ print(version.with_display_mode(VersionDisplayMode.GAME))
 ```python
 from riotmanifest import LeagueManifestResolver
 
-rgd = LeagueManifestResolver()
-pair = rgd.resolve_live_manifest_pair("EUW")
+resolver = LeagueManifestResolver()
+pair = resolver.resolve_manifest_pair("EUW")
 ```
 
 ### 如果你要同补丁里的最新 GAME
@@ -416,8 +416,8 @@ pair = rgd.resolve_live_manifest_pair("EUW")
 ```python
 from riotmanifest import LeagueManifestResolver, VersionMatchMode
 
-rgd = LeagueManifestResolver()
-pair = rgd.resolve_live_manifest_pair(
+resolver = LeagueManifestResolver()
+pair = resolver.resolve_manifest_pair(
     "EUW",
     match_mode=VersionMatchMode.PATCH_LATEST,
 )
@@ -432,10 +432,10 @@ from riotmanifest import (
     VersionMatchMode,
 )
 
-rgd = LeagueManifestResolver()
+resolver = LeagueManifestResolver()
 
 try:
-    pair = rgd.resolve_live_manifest_pair(
+    pair = resolver.resolve_manifest_pair(
         "EUW",
         match_mode=VersionMatchMode.STRICT,
     )
@@ -449,11 +449,11 @@ except ConsistentGameManifestNotFoundError:
 旧调用方式通常是：
 
 ```python
-rgd.load_lcu_data()
-rgd.load_game_data(regions=["EUW1"])
+resolver.load_lcu_data()
+resolver.load_game_data(regions=["EUW1"])
 
-lcu = rgd.latest_lcu("EUW")
-game = rgd.latest_game("EUW1")
+lcu = resolver.latest_lcu("EUW")
+game = resolver.latest_game("EUW1")
 ```
 
 问题：
@@ -468,8 +468,8 @@ game = rgd.latest_game("EUW1")
 ```python
 from riotmanifest import LeagueManifestResolver, VersionMatchMode
 
-rgd = LeagueManifestResolver()
-pair = rgd.resolve_live_manifest_pair(
+resolver = LeagueManifestResolver()
+pair = resolver.resolve_manifest_pair(
     "EUW",
     match_mode=VersionMatchMode.IGNORE_REVISION,
 )
@@ -480,8 +480,8 @@ pair = rgd.resolve_live_manifest_pair(
 ```python
 from riotmanifest import LeagueManifestResolver, VersionMatchMode
 
-rgd = LeagueManifestResolver()
-version = rgd.resolve_live_version(
+resolver = LeagueManifestResolver()
+version = resolver.resolve_version(
     "EUW",
     match_mode=VersionMatchMode.IGNORE_REVISION,
 )

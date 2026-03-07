@@ -420,19 +420,19 @@ class LeagueManifestResolver:
             ]
 
     def latest_lcu(self, region: str = "EUW") -> dict[str, str] | None:
-        """获取指定区域当前 live LCU 配置的兼容视图.
+        """获取指定区域当前 patchline LCU 配置的兼容视图.
 
         Deprecated:
             该兼容接口计划在 `v3.0.0` 删除。请改用
-            `resolve_live_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`
-            或 `get_live_lcu_manifest(...)`。
+            `resolve_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`
+            或 `get_lcu_manifest(...)`。
         """
         _warn_deprecated_latest_api(
             owner_name=self.__class__.__name__,
             api_name="latest_lcu",
             replacement=(
-                "resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)"
-                " 或 get_live_lcu_manifest(region)"
+                "resolve_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)"
+                " 或 get_lcu_manifest(region)"
             ),
         )
         if not self._lcu_data:
@@ -451,12 +451,12 @@ class LeagueManifestResolver:
 
         Deprecated:
             该兼容接口计划在 `v3.0.0` 删除。请改用
-            `resolve_live_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`。
+            `resolve_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`。
         """
         _warn_deprecated_latest_api(
             owner_name=self.__class__.__name__,
             api_name="latest_game",
-            replacement="resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)",
+            replacement="resolve_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)",
         )
         if region not in self._game_data:
             self.load_game_data(regions=[region])
@@ -472,14 +472,14 @@ class LeagueManifestResolver:
             "url": latest.url,
         }
 
-    def get_live_lcu_manifest(self, region: str = "EUW") -> ManifestRef:
-        """返回当前 live 配置中的 LCU manifest 引用.
+    def get_lcu_manifest(self, region: str = "EUW") -> ManifestRef:
+        """返回指定区域当前 patchline 配置中的 LCU manifest 引用.
 
         Args:
             region: LCU 区域标识，例如 `EUW`。
 
         Returns:
-            当前 live LCU manifest 引用。
+            当前 patchline 的 LCU manifest 引用。
 
         Raises:
             LiveConfigNotFoundError: 当目标区域不存在 live 配置时抛出。
@@ -500,14 +500,14 @@ class LeagueManifestResolver:
             version=None,
         )
 
-    def list_live_game_candidates(self, region: str = "EUW") -> list[ManifestRef]:
-        """列出当前 live 配置对应的 GAME 候选集合.
+    def list_game_candidates(self, region: str = "EUW") -> list[ManifestRef]:
+        """列出指定区域当前 patchline 配置对应的 GAME 候选集合.
 
         Args:
             region: LCU 区域标识，例如 `EUW`。
 
         Returns:
-            当前 live 配置对应的 GAME manifest 候选列表。
+            当前 patchline 配置对应的 GAME manifest 候选列表。
 
         Raises:
             LiveConfigNotFoundError: 当目标区域不存在 live 配置时抛出。
@@ -542,14 +542,14 @@ class LeagueManifestResolver:
 
         return list(self._game_data[record.game_version_set])
 
-    def resolve_live_manifest_pair(
+    def resolve_manifest_pair(
         self,
         region: str = "EUW",
         *,
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         version_display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
     ) -> LiveManifestPair:
-        """解析当前 live 且版本规则明确的一对 LCU/GAME manifest.
+        """解析指定区域当前 patchline 且版本规则明确的一对 LCU/GAME manifest.
 
         Args:
             region: LCU 区域标识，例如 `EUW`。
@@ -558,7 +558,7 @@ class LeagueManifestResolver:
             version_display_mode: 统一版本号的默认显示模式。
 
         Returns:
-            当前 live 的一致 manifest 对。
+            当前 patchline 的一致 manifest 对。
 
         Raises:
             LiveConfigNotFoundError: 当目标区域不存在有效 live 配置时抛出。
@@ -570,7 +570,7 @@ class LeagueManifestResolver:
         if isinstance(version_display_mode, str):
             version_display_mode = VersionDisplayMode(version_display_mode)
 
-        lcu_manifest = self.get_live_lcu_manifest(region)
+        lcu_manifest = self.get_lcu_manifest(region)
         lcu_version = self._lcu_version_resolver.resolve(lcu_manifest.url)
         lcu_manifest = ManifestRef(
             artifact_group=lcu_manifest.artifact_group,
@@ -581,7 +581,7 @@ class LeagueManifestResolver:
             version=lcu_version,
         )
 
-        candidates = self.list_live_game_candidates(region)
+        candidates = self.list_game_candidates(region)
         exact_matches = [
             candidate
             for candidate in candidates
@@ -675,15 +675,15 @@ class LeagueManifestResolver:
             candidate_count=len(candidates),
         )
 
-    def resolve_live_version(
+    def resolve_version(
         self,
         region: str = "EUW",
         *,
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
     ) -> ResolvedVersion:
-        """返回当前 live 的统一版本号对象."""
-        pair = self.resolve_live_manifest_pair(
+        """返回指定区域当前 patchline 的统一版本号对象."""
+        pair = self.resolve_manifest_pair(
             region=region,
             match_mode=match_mode,
             version_display_mode=display_mode,
@@ -698,7 +698,7 @@ class LeagueManifestResolver:
         **extractor_kwargs: Any,
     ) -> WADExtractor:
         """为指定 LCU 区域构造 WADExtractor。."""
-        lcu_manifest = self.get_live_lcu_manifest(region)
+        lcu_manifest = self.get_lcu_manifest(region)
         manifest = PatcherManifest(file=lcu_manifest.url, path=manifest_path)
         return WADExtractor(manifest, **extractor_kwargs)
 
@@ -710,8 +710,8 @@ class LeagueManifestResolver:
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         **extractor_kwargs: Any,
     ) -> WADExtractor:
-        """为指定区域当前 live 的一致 GAME manifest 构造 WADExtractor."""
-        pair = self.resolve_live_manifest_pair(region, match_mode=match_mode)
+        """为指定区域当前 patchline 的一致 GAME manifest 构造 WADExtractor."""
+        pair = self.resolve_manifest_pair(region, match_mode=match_mode)
         manifest = PatcherManifest(file=pair.game.url, path=manifest_path)
         return WADExtractor(manifest, **extractor_kwargs)
 
