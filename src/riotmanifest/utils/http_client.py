@@ -9,6 +9,11 @@ import urllib3
 from urllib3 import exceptions as urllib3_exceptions
 from urllib3.util import Timeout
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+)
+
 
 class HttpClientError(Exception):
     """HTTP 客户端通用异常."""
@@ -78,11 +83,13 @@ class HttpClient:
             HttpClientError: 请求失败或响应状态码异常时抛出.
         """
         request_timeout = timeout or self.timeout
+        request_headers = dict(headers) if headers else {}
+        request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
         try:
             response = self._pool.request(
                 "GET",
                 url,
-                headers=dict(headers) if headers else None,
+                headers=request_headers,
                 timeout=request_timeout,
                 preload_content=True,
             )

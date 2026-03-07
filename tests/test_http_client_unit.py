@@ -3,7 +3,15 @@ import types
 import pytest
 from urllib3 import exceptions as urllib3_exceptions
 
-from riotmanifest.utils.http_client import HttpClient, HttpClientError, HttpResponse, http_get, http_get_bytes, http_get_json
+from riotmanifest.utils.http_client import (
+    DEFAULT_USER_AGENT,
+    HttpClient,
+    HttpClientError,
+    HttpResponse,
+    http_get,
+    http_get_bytes,
+    http_get_json,
+)
 
 
 def test_http_response_json_success():
@@ -20,12 +28,40 @@ def test_http_response_json_invalid_raises():
 def test_http_client_get_success():
     client = HttpClient()
     fake_resp = types.SimpleNamespace(status=200, data=b"abc", headers={"X-Test": "1"})
-    client._pool = types.SimpleNamespace(request=lambda *args, **kwargs: fake_resp)
+    captured: dict[str, object] = {}
+
+    def _request(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return fake_resp
+
+    client._pool = types.SimpleNamespace(request=_request)
 
     result = client.get("https://example.invalid")
     assert result.status == 200
     assert result.data == b"abc"
     assert result.headers["X-Test"] == "1"
+    assert captured["kwargs"]["headers"]["User-Agent"] == DEFAULT_USER_AGENT
+
+
+def test_http_client_get_preserves_custom_user_agent():
+    client = HttpClient()
+    fake_resp = types.SimpleNamespace(status=200, data=b"abc", headers={})
+    captured: dict[str, object] = {}
+
+    def _request(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return fake_resp
+
+    client._pool = types.SimpleNamespace(request=_request)
+
+    client.get(
+        "https://example.invalid",
+        headers={"User-Agent": "CustomAgent/1.0", "Range": "bytes=0-9"},
+    )
+
+    assert captured["kwargs"]["headers"]["User-Agent"] == "CustomAgent/1.0"
+    assert captured["kwargs"]["headers"]["Range"] == "bytes=0-9"
 
 
 def test_http_client_get_http_error_raises():
