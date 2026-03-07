@@ -1,14 +1,22 @@
-# LeagueManifestResolver 参考
+# League Manifest 工具参考
 
 ## 作用范围
 
-本文件说明 `LeagueManifestResolver` 当前的定位、数据结构、匹配逻辑和对外版本对象。
+本文件说明 `LeagueManifestResolver`、`LeagueManifestInspector` 当前的定位、数据结构、匹配逻辑和对外版本对象。
+
+范围说明：
+- `riotmanifest.game` 当前只面向英雄联盟（LoL）清单
+- 当前这两个类都不负责其他 Riot 游戏 manifest
+- 其他游戏暂时没有接入计划
 
 定义位置：
 - [src/riotmanifest/game/factory.py](../src/riotmanifest/game/factory.py)
+- [src/riotmanifest/game/inspection.py](../src/riotmanifest/game/inspection.py)
 - [src/riotmanifest/game/metadata.py](../src/riotmanifest/game/metadata.py)
 
 ## 当前定位
+
+### `LeagueManifestResolver`
 
 `LeagueManifestResolver` 当前不是“完整历史版本管理器”。  
 它的职责已经收敛为：
@@ -17,6 +25,15 @@
 - 找到当前 patchline 对应的 GAME 候选集合
 - 按规则构造“当前 patchline 且版本规则明确”的一对 LCU/GAME manifest
 - 提供统一版本号对象
+
+### `LeagueManifestInspector`
+
+`LeagueManifestInspector` 的职责与 live patchline 无关。
+它的定位是：
+
+- 从单个 manifest 文件或 URL 出发，识别它是 `lcu`、`game` 还是 `unknown`
+- 在单清单场景返回类型与版本信息
+- 在双清单场景自动尝试配对；当结果满足 `VersionMatchMode` 时返回 `LiveManifestPair`
 
 ## 兼容说明
 
@@ -124,10 +141,11 @@
 字段：
 
 - `artifact_group`
-  - `lcu` 或 `game`
+  - `lcu`、`game` 或 `unknown`
 - `region`
+  - Inspector 场景固定为 `inspection`
 - `source`
-  - 例如 `clientconfig` / `sieve`
+  - 例如 `clientconfig` / `sieve` / `manifest_inspector`
 - `url`
 - `manifest_id`
 - `version`
@@ -182,11 +200,108 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 - `match_reason`
   - 解释这次结果是怎么选出来的
 
+## `LeagueManifestInspector` 公开方法
+
+### `inspect_manifest(source)`
+
+返回：
+
+- `ManifestRef`
+
+用途：
+
+- 从单个 manifest 文件或 URL 出发，识别它是 `lcu`、`game` 还是 `unknown`
+- 如果能从内容中提取版本，则把结果填入 `manifest.version`
+
+### `inspect_pair(first, second, ...)`
+
+签名重点：
+
+```python
+inspect_pair(
+    first,
+    second,
+    match_mode=VersionMatchMode.IGNORE_REVISION,
+    version_display_mode=VersionDisplayMode.IGNORE_REVISION,
+)
+```
+
+返回：
+
+- `LiveManifestPair`
+
+行为：
+
+- 输入顺序不限；内部会自动拆出一 `lcu` + 一 `game`
+- 两侧都带版本且满足 `VersionMatchMode` 时才返回结果
+- Inspector 场景的 `candidate_count` 固定为 `1`
+
+### `inspect_manifests(*sources, ...)`
+
+返回：
+
+- 传入 `1` 个输入时返回 `ManifestRef`
+- 传入 `2` 个输入时返回 `LiveManifestPair`
+
+适合：
+
+- 你希望让上层代码直接按输入数量分发，而不手动判断调用哪个方法
+
+## Inspector 判定与版本提取逻辑
+
+### 类型判定
+
+- `GAME`
+  - 命中 `content-metadata.json` 或 `League of Legends.exe`
+- `LCU`
+  - 命中 `LeagueClient.exe`
+  - macOS 场景可次级回退到 `Contents/LoL/LeagueClient.app/Contents/Info.plist`
+- `unknown`
+  - 两侧强特征都不存在时返回 `unknown`
+
+### 版本提取
+
+- `GAME`
+  - 优先读取 `content-metadata.json`
+  - 若缺失，再回退 `League of Legends.exe`
+- `LCU`
+  - 优先读取 `LeagueClient.exe`
+  - macOS 仅作次级支持
+- `system.yaml`
+  - 不属于 Inspector 的版本提取路径
+  - Resolver 内部残留的弱提示逻辑也不应作为对外依赖
+
+### 信任边界
+
+`LeagueManifestInspector` 是开发者工具。
+
+它只根据 manifest 内容提取类型与版本，不对上游 manifest 的真实性做额外背书。
+如果上游项目提供的是伪造或被篡改的 manifest，那么 Inspector 返回的类型和版本同样不可信。
+
+### 真实样本来源
+
+手动验证时，可直接使用 `Morilli/riot-manifests` 中的 LoL 样本。
+该仓库当前按 `LoL/<region>/<platform>/<artifact>/...` 组织，其中 `.txt` 文件内容就是原始 manifest URL。
+
+例如当前可直接配对的一组 EUW1 Windows 样本：
+
+- `LoL/EUW1/windows/league-client/16.5.751.8496.txt`
+- `LoL/EUW1/windows/lol-game-client/16.5.7511533.txt`
+
 ## 错误对象
 
 ### `RiotGameDataError`
 
 `RiotGameDataError` 当前仍作为兼容错误基类保留。
+
+### `ManifestInspectionError`
+
+表示 Inspector 无法从输入中形成稳定结论。
+常见原因包括：
+
+- 同一个 manifest 同时命中 LCU / GAME 强特征
+- 两个输入无法组成“一 LCU 一 GAME”
+- 期望的版本载体不存在或内容不可解析
 
 ### `LiveConfigNotFoundError`
 
@@ -194,7 +309,7 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 
 ### `LcuVersionUnavailableError`
 
-表示无法从 live LCU manifest 中严格提取版本。
+表示无法从 LCU manifest 中严格提取版本。
 
 ### `ConsistentGameManifestNotFoundError`
 
@@ -291,12 +406,16 @@ resolve_version(
 3. 从其 UTF-16LE 版本资源中提取：
    - `ProductVersion`
    - `FileVersion`
-4. 若是 macOS 路径，则回退到 `Info.plist`
-5. 若只能拿到 `system.yaml` 的 `Releases/16.5` 这种提示，则视为“不足以严格解析”
+4. macOS 场景才回退到 `Info.plist`
+5. `system.yaml` 的旧提示路径不属于对外严格解析能力
 
 ### GAME 版本
 
-当前来自 `patchsieve.version_set` 对应的 `lol-game-client` release 列表。
+- `LeagueManifestResolver`
+  - 当前来自 `patchsieve.version_set` 对应的 `lol-game-client` release 列表
+- `LeagueManifestInspector`
+  - 优先读取 `content-metadata.json`
+  - 若缺失，再回退 `League of Legends.exe`
 
 ## 匹配逻辑
 
@@ -461,6 +580,36 @@ try:
 except ConsistentGameManifestNotFoundError:
     # live 窗口期这里大概率会触发
     pair = None
+```
+
+### 判断单个 manifest 的类型与版本
+
+```python
+from riotmanifest import LeagueManifestInspector
+
+inspector = LeagueManifestInspector()
+manifest = inspector.inspect_manifest(
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/79CFFE595C2B0C01.manifest"
+)
+
+print(manifest.artifact_group)           # game
+print(manifest.version.display_version)  # 16.5.7511533
+```
+
+### 判断两个 manifest 能否组成一对
+
+```python
+from riotmanifest import LeagueManifestInspector
+
+inspector = LeagueManifestInspector()
+pair = inspector.inspect_pair(
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/8E78E3C2EFDB30F0.manifest",
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/79CFFE595C2B0C01.manifest",
+)
+
+print(str(pair.version))  # 16.5
+print(pair.lcu.version.display_version)   # 16.5.751.8496
+print(pair.game.version.display_version)  # 16.5.7511533
 ```
 
 ## 从旧接口迁移

@@ -106,6 +106,34 @@ print(pair.game.url)
 > 才建议使用 `STRICT` 并自行处理失败。
 > 旧类名 `RiotGameData` 仍保留为兼容别名，实例化时会发出 `FutureWarning`。
 
+### 5. 判断单个或两个英雄联盟 manifest 的类型与版本
+
+```python
+from riotmanifest import LeagueManifestInspector
+
+inspector = LeagueManifestInspector()
+
+manifest = inspector.inspect_manifest(
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/79CFFE595C2B0C01.manifest"
+)
+print(manifest.artifact_group)           # game
+print(manifest.version.display_version)  # 16.5.7511533
+
+pair = inspector.inspect_pair(
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/8E78E3C2EFDB30F0.manifest",
+    "https://lol.secure.dyn.riotcdn.net/channels/public/releases/79CFFE595C2B0C01.manifest",
+)
+print(str(pair.version))  # 16.5
+```
+
+> `LeagueManifestInspector` 是开发者工具：它只根据 manifest 内容提取类型与版本，
+> 不对上游清单真实性背书。当前 `riotmanifest.game` 包中的 `LeagueManifestResolver`
+> 与 `LeagueManifestInspector` 都只面向英雄联盟（LoL）清单；其他 Riot 游戏当前没有接入计划。
+> 手动验证时可直接使用 `Morilli/riot-manifests`
+> 中的文本样本；例如 `LoL/EUW1/windows/league-client/16.5.751.8496.txt` 与
+> `LoL/EUW1/windows/lol-game-client/16.5.7511533.txt` 当前分别指向一对可配对的
+> LCU / GAME manifest URL。
+
 ## 实践建议
 
 ### 下载
@@ -143,7 +171,7 @@ print(pair.game.url)
 - [docs/manifest.md](docs/manifest.md)：Manifest 下载参考
 - [docs/extractor.md](docs/extractor.md)：WADExtractor 参考
 - [docs/diff.md](docs/diff.md)：差异分析参考
-- [docs/game.md](docs/game.md)：LeagueManifestResolver / 版本对象参考
+- [docs/game.md](docs/game.md)：LeagueManifestResolver / LeagueManifestInspector / 版本对象参考
 - [docs/TESTING.md](docs/TESTING.md)：测试与基准说明
 
 ## 维护者

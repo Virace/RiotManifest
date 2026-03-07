@@ -1,4 +1,4 @@
-"""LeagueManifestResolver 对外导出入口."""
+"""League manifest 工具对外导出入口."""
 
 from riotmanifest.game.factory import (
     ConsistentGameManifestNotFoundError,
@@ -14,13 +14,19 @@ from riotmanifest.game.factory import (
     VersionInfo,
     VersionMatchMode,
 )
+from riotmanifest.game.inspection import (
+    LeagueManifestInspector,
+    ManifestInspectionError,
+)
 
 __all__ = [
     "ConsistentGameManifestNotFoundError",
     "LcuVersionUnavailableError",
     "LeagueManifestResolver",
+    "LeagueManifestInspector",
     "LiveConfigNotFoundError",
     "LiveManifestPair",
+    "ManifestInspectionError",
     "ManifestRef",
     "ResolvedVersion",
     "RiotGameData",

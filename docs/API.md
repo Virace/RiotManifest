@@ -10,7 +10,7 @@
 2. [manifest.md](./manifest.md)：Manifest 下载主线
 3. [extractor.md](./extractor.md)：WAD 按需提取
 4. [diff.md](./diff.md)：Manifest / WAD 差异分析与 BIN 路径回填
-5. [game.md](./game.md)：`LeagueManifestResolver`、live 一致对、版本对象与错误语义
+5. [game.md](./game.md)：`LeagueManifestResolver`、`LeagueManifestInspector`、版本对象与错误语义
 6. [TESTING.md](./TESTING.md)：测试脚本、验证方式与基准说明
 
 ## 按任务选文档
@@ -35,6 +35,12 @@
 
 - 看 [game.md](./game.md)
 - 其中 live 场景示例默认显式使用 `VersionMatchMode.IGNORE_REVISION`
+
+### 我想判断一个或两个历史 manifest 的类型与版本
+
+- 看 [game.md](./game.md)
+- `LeagueManifestInspector` 支持单清单识别和双清单配对
+- 当前 `game` 包里的这两个类只面向英雄联盟（LoL）清单；其他 Riot 游戏暂无接入计划
 
 ## 包根导出一览
 
@@ -72,8 +78,9 @@
 - `WADPathProvider`
 - `ManifestBinPathProvider`
 
-### LeagueManifestResolver 与版本对象
+### LeagueManifestResolver、Inspector 与版本对象
 
+- `LeagueManifestInspector`
 - `LeagueManifestResolver`
 - `RiotGameData`（兼容旧名，实例化时会发出 `FutureWarning`，计划在 `v3.0.0` 删除）
 - `VersionMatchMode`
@@ -82,6 +89,7 @@
 - `ManifestRef`
 - `ResolvedVersion`
 - `LiveManifestPair`
+- `ManifestInspectionError`
 - `RiotGameDataError`
 - `LiveConfigNotFoundError`
 - `LcuVersionUnavailableError`

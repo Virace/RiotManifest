@@ -394,7 +394,11 @@ class _LcuVersionResolver:
 
     @staticmethod
     def _extract_macos_version(payload: bytes) -> str:
-        """从 macOS Info.plist 中提取版本."""
+        """从 macOS Info.plist 中提取版本.
+
+        Notes:
+            这是非主要支持路径，当前主要版本提取目标仍是 Windows 客户端载体。
+        """
         plist_data = plistlib.loads(payload)
         for key in ("FileVersion", "CFBundleVersion", "CFBundleShortVersionString"):
             value = plist_data.get(key)
@@ -403,7 +407,11 @@ class _LcuVersionResolver:
         raise LcuVersionUnavailableError("无法从 Info.plist 中提取客户端版本")
 
     def _extract_patch_version_hint(self, *, manifest: PatcherManifest, temp_dir: Path) -> str | None:
-        """从 `system.yaml` 中提取补丁版本提示."""
+        """从 `system.yaml` 中提取非严格补丁提示.
+
+        Notes:
+            该路径只提供弱提示，不参与严格版本解析，后续计划删除。
+        """
         system_file = manifest.files.get("system.yaml")
         if system_file is None:
             return None
