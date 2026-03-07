@@ -186,7 +186,8 @@ def test_load_game_data_for_non_default_region(monkeypatch):
 
     data = RiotGameData()
     data.load_game_data(regions=["KR"])
-    latest = data.latest_game("KR")
+    with pytest.warns(FutureWarning, match="latest_game\\(\\) 已弃用"):
+        latest = data.latest_game("KR")
     assert latest is not None
     assert latest["version"] == "14.2.1"
     assert latest["url"] == "https://example.invalid/kr-1421.manifest"
@@ -218,7 +219,7 @@ def test_build_game_extractor_uses_resolved_pair(monkeypatch):
     monkeypatch.setattr(
         RiotGameData,
         "resolve_live_manifest_pair",
-        lambda self, region, match_mode=VersionMatchMode.STRICT: types.SimpleNamespace(
+        lambda self, region, match_mode=VersionMatchMode.IGNORE_REVISION: types.SimpleNamespace(
             game=types.SimpleNamespace(url="https://example.invalid/euw-live.manifest")
         ),
     )
@@ -269,7 +270,8 @@ def test_load_lcu_and_build_extractor(monkeypatch):
 
     data = RiotGameData()
     data.load_lcu_data()
-    latest = data.latest_lcu("EUW")
+    with pytest.warns(FutureWarning, match="latest_lcu\\(\\) 已弃用"):
+        latest = data.latest_lcu("EUW")
     assert latest is not None
     assert latest["version"] == "14.4.1"
 
@@ -385,6 +387,132 @@ def test_resolve_live_manifest_pair_ignore_revision_fallback(monkeypatch):
             "releases": [
                 _make_game_release("16.5.7496037+meta", "https://example.invalid/game-7496037.manifest"),
                 _make_game_release("16.5.7511533+meta", "https://example.invalid/game-7511533.manifest"),
+                _make_game_release("16.5.7519084+meta", "https://example.invalid/game-7519084.manifest"),
+            ]
+        }
+
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+
+    data = RiotGameData()
+    monkeypatch.setattr(
+        data._lcu_version_resolver,
+        "resolve",
+        lambda manifest_url: VersionInfo(
+            display_version="16.5.751.8496",
+            normalized_build="16.5.7518496",
+            patch_version="16.5",
+        ),
+    )
+
+    pair = data.resolve_live_manifest_pair(
+        "EUW",
+        match_mode=VersionMatchMode.IGNORE_REVISION,
+    )
+
+    assert pair.game.url == "https://example.invalid/game-7511533.manifest"
+    assert str(pair.version) == "16.5"
+    assert pair.is_exact_match is False
+    assert pair.match_reason == "ignore_revision_fallback"
+
+
+def test_resolve_live_manifest_pair_defaults_to_ignore_revision(monkeypatch):
+    def _fake_http_get_json(url: str):
+        if "clientconfig.rpg.riotgames.com" in url:
+            return {
+                "league.live": {
+                    "platforms": {
+                        "win": {
+                            "configurations": [
+                                {
+                                    "id": "EUW",
+                                    "patch_url": "https://example.invalid/lcu-euw.manifest",
+                                    "metadata": {
+                                        "theme_manifest": "https://example.invalid/channels/public/rccontent/theme/16.5/EUW/manifest.json"
+                                    },
+                                    "patch_artifacts": [
+                                        {
+                                            "id": "game_client",
+                                            "type": "patchsieve",
+                                            "patchsieve": {
+                                                "version_set": "EUW1",
+                                                "parameters": {
+                                                    "artifact_type_id": "lol-game-client",
+                                                    "platform": "windows",
+                                                },
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        return {
+            "releases": [
+                _make_game_release("16.5.7496037+meta", "https://example.invalid/game-7496037.manifest"),
+                _make_game_release("16.5.7511533+meta", "https://example.invalid/game-7511533.manifest"),
+                _make_game_release("16.5.7519084+meta", "https://example.invalid/game-7519084.manifest"),
+            ]
+        }
+
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+
+    data = RiotGameData()
+    monkeypatch.setattr(
+        data._lcu_version_resolver,
+        "resolve",
+        lambda manifest_url: VersionInfo(
+            display_version="16.5.751.8496",
+            normalized_build="16.5.7518496",
+            patch_version="16.5",
+        ),
+    )
+
+    pair = data.resolve_live_manifest_pair("EUW")
+
+    assert pair.game.url == "https://example.invalid/game-7511533.manifest"
+    assert pair.match_mode is VersionMatchMode.IGNORE_REVISION
+    assert pair.match_reason == "ignore_revision_fallback"
+
+
+def test_resolve_live_manifest_pair_ignore_revision_raises_when_all_patch_candidates_newer(monkeypatch):
+    def _fake_http_get_json(url: str):
+        if "clientconfig.rpg.riotgames.com" in url:
+            return {
+                "league.live": {
+                    "platforms": {
+                        "win": {
+                            "configurations": [
+                                {
+                                    "id": "EUW",
+                                    "patch_url": "https://example.invalid/lcu-euw.manifest",
+                                    "metadata": {
+                                        "theme_manifest": "https://example.invalid/channels/public/rccontent/theme/16.5/EUW/manifest.json"
+                                    },
+                                    "patch_artifacts": [
+                                        {
+                                            "id": "game_client",
+                                            "type": "patchsieve",
+                                            "patchsieve": {
+                                                "version_set": "EUW1",
+                                                "parameters": {
+                                                    "artifact_type_id": "lol-game-client",
+                                                    "platform": "windows",
+                                                },
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        return {
+            "releases": [
+                _make_game_release("16.5.7511533+meta", "https://example.invalid/game-7511533.manifest"),
+                _make_game_release("16.5.7519084+meta", "https://example.invalid/game-7519084.manifest"),
             ]
         }
 
@@ -401,15 +529,78 @@ def test_resolve_live_manifest_pair_ignore_revision_fallback(monkeypatch):
         ),
     )
 
-    pair = data.resolve_live_manifest_pair(
-        "EUW",
-        match_mode=VersionMatchMode.IGNORE_REVISION,
+    with pytest.raises(
+        ConsistentGameManifestNotFoundError,
+        match="没有不高于 LCU build 16.5.7509999 的 GAME manifest",
+    ):
+        data.resolve_live_manifest_pair(
+            "EUW",
+            match_mode=VersionMatchMode.IGNORE_REVISION,
+        )
+
+
+def test_resolve_live_manifest_pair_patch_latest_picks_newest_same_patch(monkeypatch):
+    def _fake_http_get_json(url: str):
+        if "clientconfig.rpg.riotgames.com" in url:
+            return {
+                "league.live": {
+                    "platforms": {
+                        "win": {
+                            "configurations": [
+                                {
+                                    "id": "EUW",
+                                    "patch_url": "https://example.invalid/lcu-euw.manifest",
+                                    "metadata": {
+                                        "theme_manifest": "https://example.invalid/channels/public/rccontent/theme/16.5/EUW/manifest.json"
+                                    },
+                                    "patch_artifacts": [
+                                        {
+                                            "id": "game_client",
+                                            "type": "patchsieve",
+                                            "patchsieve": {
+                                                "version_set": "EUW1",
+                                                "parameters": {
+                                                    "artifact_type_id": "lol-game-client",
+                                                    "platform": "windows",
+                                                },
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        return {
+            "releases": [
+                _make_game_release("16.5.7496037+meta", "https://example.invalid/game-7496037.manifest"),
+                _make_game_release("16.5.7511533+meta", "https://example.invalid/game-7511533.manifest"),
+                _make_game_release("16.5.7519084+meta", "https://example.invalid/game-7519084.manifest"),
+            ]
+        }
+
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+
+    data = RiotGameData()
+    monkeypatch.setattr(
+        data._lcu_version_resolver,
+        "resolve",
+        lambda manifest_url: VersionInfo(
+            display_version="16.5.751.8496",
+            normalized_build="16.5.7518496",
+            patch_version="16.5",
+        ),
     )
 
-    assert pair.game.url == "https://example.invalid/game-7511533.manifest"
-    assert str(pair.version) == "16.5"
+    pair = data.resolve_live_manifest_pair(
+        "EUW",
+        match_mode=VersionMatchMode.PATCH_LATEST,
+    )
+
+    assert pair.game.url == "https://example.invalid/game-7519084.manifest"
     assert pair.is_exact_match is False
-    assert pair.match_reason == "ignore_revision_fallback"
+    assert pair.match_reason == "patch_latest_fallback"
 
 
 def test_resolve_live_manifest_pair_strict_raises_without_exact_match(monkeypatch):
@@ -465,7 +656,10 @@ def test_resolve_live_manifest_pair_strict_raises_without_exact_match(monkeypatc
     )
 
     with pytest.raises(ConsistentGameManifestNotFoundError, match="16.5.7511533"):
-        data.resolve_live_manifest_pair("EUW")
+        data.resolve_live_manifest_pair(
+            "EUW",
+            match_mode=VersionMatchMode.STRICT,
+        )
 
 
 def test_extract_windows_version_from_utf16_payload():

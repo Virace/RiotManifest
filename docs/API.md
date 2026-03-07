@@ -34,6 +34,7 @@
 ### 我想拿到当前 live 且版本规则明确的一对 LCU/GAME manifest
 
 - 看 [game.md](./game.md)
+- 其中 live 场景示例默认显式使用 `VersionMatchMode.IGNORE_REVISION`
 
 ## 包根导出一览
 

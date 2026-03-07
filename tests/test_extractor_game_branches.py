@@ -545,7 +545,8 @@ def test_load_lcu_data_skips_invalid_configs(monkeypatch):
     data = RiotGameData()
     data.load_lcu_data()
 
-    assert data.latest_lcu("EUW") == {"version": "14.4.1", "url": "https://example.invalid/euw.manifest"}
+    with pytest.warns(FutureWarning, match="latest_lcu\\(\\) 已弃用"):
+        assert data.latest_lcu("EUW") == {"version": "14.4.1", "url": "https://example.invalid/euw.manifest"}
 
 
 def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch):
@@ -566,7 +567,8 @@ def test_load_game_data_skips_non_dict_release_and_available_regions(monkeypatch
     data = RiotGameData()
     data.load_game_data(regions=["KR", "EUW1"])
 
-    assert data.latest_game("KR") == {"version": "14.2.1", "url": "https://example.invalid/kr-1421.manifest"}
+    with pytest.warns(FutureWarning, match="latest_game\\(\\) 已弃用"):
+        assert data.latest_game("KR") == {"version": "14.2.1", "url": "https://example.invalid/kr-1421.manifest"}
     assert data.available_game_regions() == ["EUW1", "KR"]
 
 
