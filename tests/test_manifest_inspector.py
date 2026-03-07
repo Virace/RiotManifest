@@ -284,3 +284,137 @@ def test_inspect_manifests_dispatches_by_count(monkeypatch: pytest.MonkeyPatch) 
     assert inspector.inspect_manifests("one", "two") is pair_result
     with pytest.raises(ValueError, match="只支持 1 个或 2 个"):
         inspector.inspect_manifests("one", "two", "three")
+
+
+def test_inspect_pair_rejects_patch_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    inspector = LeagueManifestInspector()
+    monkeypatch.setattr(
+        inspector,
+        "inspect_manifest",
+        lambda source: {
+            "game": _make_manifest_ref(
+                artifact_group="game",
+                url="https://example.invalid/game.manifest",
+                version=_make_version(
+                    normalized_build="16.6.7511533",
+                    patch_version="16.6",
+                    metadata_version="16.6.7511533",
+                ),
+            ),
+            "lcu": _make_manifest_ref(
+                artifact_group="lcu",
+                url="https://example.invalid/lcu.manifest",
+                version=_make_version(
+                    normalized_build="16.5.7518496",
+                    patch_version="16.5",
+                    exe_version="16.5.751.8496",
+                ),
+            ),
+        }[source],
+    )
+
+    with pytest.raises(ConsistentGameManifestNotFoundError, match="补丁版本不一致"):
+        inspector.inspect_pair("lcu", "game")
+
+
+def test_inspect_pair_rejects_newer_game_in_ignore_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    inspector = LeagueManifestInspector()
+    monkeypatch.setattr(
+        inspector,
+        "inspect_manifest",
+        lambda source: {
+            "game": _make_manifest_ref(
+                artifact_group="game",
+                url="https://example.invalid/game.manifest",
+                version=_make_version(
+                    normalized_build="16.5.7519084",
+                    patch_version="16.5",
+                    metadata_version="16.5.7519084",
+                ),
+            ),
+            "lcu": _make_manifest_ref(
+                artifact_group="lcu",
+                url="https://example.invalid/lcu.manifest",
+                version=_make_version(
+                    normalized_build="16.5.7518496",
+                    patch_version="16.5",
+                    exe_version="16.5.751.8496",
+                ),
+            ),
+        }[source],
+    )
+
+    with pytest.raises(ConsistentGameManifestNotFoundError, match="高于"):
+        inspector.inspect_pair("lcu", "game")
+
+
+def test_detect_artifact_group_rejects_ambiguous_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    import riotmanifest.game.inspection as game_inspection
+
+    _set_manifest_registry(
+        monkeypatch,
+        {
+            "https://example.invalid/ambiguous.manifest": {
+                game_inspection.GAME_CONTENT_METADATA_PATH: object(),
+                game_inspection.LCU_EXE_PATH: object(),
+            }
+        },
+    )
+    manifest = _DummyManifest("https://example.invalid/ambiguous.manifest", "")
+
+    with pytest.raises(ManifestInspectionError, match="同时命中 LCU/GAME 特征"):
+        LeagueManifestInspector._detect_artifact_group(manifest)
+
+
+def test_resolve_lcu_version_supports_macos_plist(monkeypatch: pytest.MonkeyPatch) -> None:
+    import riotmanifest.game.inspection as game_inspection
+
+    _set_manifest_registry(
+        monkeypatch,
+        {
+            "https://example.invalid/mac.manifest": {
+                game_inspection.LCU_MACOS_INFO_PLIST_PATH: object(),
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "riotmanifest.game.inspection._download_manifest_payload",
+        lambda **kwargs: b"plist_payload",
+    )
+    monkeypatch.setattr(
+        "riotmanifest.game.inspection._LcuVersionResolver._extract_macos_version",
+        lambda self, payload: "16.5.751.8496",
+    )
+
+    version = LeagueManifestInspector()._resolve_lcu_version(
+        manifest=_DummyManifest("https://example.invalid/mac.manifest", ""),
+        temp_dir=Path("/tmp"),
+    )
+
+    assert version.normalized_build == "16.5.7518496"
+    assert version.exe_version == "16.5.751.8496"
+
+
+def test_manifest_inspection_helpers_validate_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    import riotmanifest.game.inspection as game_inspection
+
+    _set_manifest_registry(monkeypatch, {"https://example.invalid/missing.manifest": {}})
+
+    with pytest.raises(ManifestInspectionError, match="不存在目标文件"):
+        game_inspection._download_manifest_payload(
+            manifest=_DummyManifest("https://example.invalid/missing.manifest", ""),
+            file_path=game_inspection.GAME_EXE_PATH,
+            temp_dir=Path("/tmp"),
+        )
+    with pytest.raises(ManifestInspectionError, match="无法解析 content-metadata.json"):
+        game_inspection._extract_game_version_from_metadata(b"{")
+    with pytest.raises(ManifestInspectionError, match="缺少有效的 version 字段"):
+        game_inspection._extract_game_version_from_metadata(b'{"version": ""}')
+    with pytest.raises(ManifestInspectionError, match="未携带可用版本信息"):
+        game_inspection._require_manifest_version(
+            _make_manifest_ref(
+                artifact_group="unknown",
+                url="https://example.invalid/unknown.manifest",
+                version=None,
+            )
+        )

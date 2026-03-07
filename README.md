@@ -132,7 +132,8 @@ print(str(pair.version))  # 16.5
 > 手动验证时可直接使用 `Morilli/riot-manifests`
 > 中的文本样本；例如 `LoL/EUW1/windows/league-client/16.5.751.8496.txt` 与
 > `LoL/EUW1/windows/lol-game-client/16.5.7511533.txt` 当前分别指向一对可配对的
-> LCU / GAME manifest URL。
+> LCU / GAME manifest URL。这里的 `EUW1` 是样本仓库目录名，不是
+> `LeagueManifestResolver` 推荐的公开输入；新代码仍建议传 `EUW` 这类主区域名。
 
 ## 实践建议
 

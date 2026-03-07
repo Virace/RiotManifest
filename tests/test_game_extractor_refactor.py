@@ -9,7 +9,7 @@ from riotmanifest.game import (
     ConsistentGameManifestNotFoundError,
     LcuVersionUnavailableError,
     LeagueManifestResolver,
-    LiveConfigNotFoundError,
+    RegionConfigNotFoundError,
     VersionDisplayMode,
     VersionInfo,
     VersionMatchMode,
@@ -199,7 +199,7 @@ def test_build_game_extractor_requires_live_region(monkeypatch):
     monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", lambda url: {})
 
     data = LeagueManifestResolver()
-    with pytest.raises(LiveConfigNotFoundError, match="EUW"):
+    with pytest.raises(RegionConfigNotFoundError, match="EUW"):
         data.build_game_extractor("EUW")
 
 
@@ -415,6 +415,100 @@ def test_resolve_manifest_pair_ignore_revision_fallback(monkeypatch):
     assert str(pair.version) == "16.5"
     assert pair.is_exact_match is False
     assert pair.match_reason == "ignore_revision_fallback"
+    assert pair.region == "EUW"
+
+
+def test_resolve_manifest_pair_supports_pbe_region_alias(monkeypatch):
+    captured = {}
+
+    def _fake_http_get_json(url: str):
+        if "clientconfig.rpg.riotgames.com" in url:
+            return {
+                "league.live": {
+                    "platforms": {
+                        "win": {
+                            "configurations": [
+                                {
+                                    "id": "EUW",
+                                    "patch_url": "https://example.invalid/lcu-euw.manifest",
+                                    "metadata": {
+                                        "theme_manifest": "https://example.invalid/channels/public/rccontent/theme/16.5/EUW/manifest.json"
+                                    },
+                                    "patch_artifacts": [
+                                        {
+                                            "id": "game_client",
+                                            "type": "patchsieve",
+                                            "patchsieve": {
+                                                "version_set": "EUW1",
+                                                "parameters": {
+                                                    "artifact_type_id": "lol-game-client",
+                                                    "platform": "windows",
+                                                },
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                },
+                "league.pbe": {
+                    "platforms": {
+                        "win": {
+                            "configurations": [
+                                {
+                                    "id": "PBE",
+                                    "patch_url": "https://example.invalid/lcu-pbe.manifest",
+                                    "metadata": {
+                                        "theme_manifest": "https://example.invalid/channels/public/rccontent/theme/16.6/PBE/manifest.json"
+                                    },
+                                    "patch_artifacts": [
+                                        {
+                                            "id": "game_client",
+                                            "type": "patchsieve",
+                                            "patchsieve": {
+                                                "version_set": "PBE1",
+                                                "parameters": {
+                                                    "artifact_type_id": "lol-game-client",
+                                                    "platform": "windows",
+                                                },
+                                            },
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                },
+            }
+        captured["url"] = url
+        assert "version-sets/PBE1" in url
+        return {
+            "releases": [
+                _make_game_release("16.6.7517822+meta", "https://example.invalid/game-pbe.manifest"),
+            ]
+        }
+
+    monkeypatch.setattr("riotmanifest.game.metadata.http_get_json", _fake_http_get_json)
+
+    data = LeagueManifestResolver()
+    monkeypatch.setattr(
+        data._lcu_version_resolver,
+        "resolve",
+        lambda manifest_url: VersionInfo(
+            normalized_build="16.6.7517822",
+            patch_version="16.6",
+            exe_version="16.6.751.7822",
+        ),
+    )
+
+    pair = data.resolve_manifest_pair("PBE")
+
+    assert pair.region == "PBE"
+    assert pair.lcu.url == "https://example.invalid/lcu-pbe.manifest"
+    assert pair.game.url == "https://example.invalid/game-pbe.manifest"
+    assert "q%5Bartifact_type_id%5D=lol-game-client" in captured["url"]
+    assert "q%5Bplatform%5D=windows" in captured["url"]
 
 
 def test_resolve_manifest_pair_defaults_to_ignore_revision(monkeypatch):
@@ -704,3 +798,133 @@ def test_resolved_version_supports_multiple_display_modes():
     assert str(resolved) == "16.5"
     assert str(resolved.with_display_mode(VersionDisplayMode.LCU)) == "16.5.751.1533"
     assert str(resolved.with_display_mode(VersionDisplayMode.GAME)) == "16.5.7511533"
+
+
+def test_lcu_version_resolver_caches_by_manifest_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    import riotmanifest.game.factory as game_factory
+
+    calls = {"count": 0}
+
+    class _DummyManifest:
+        def __init__(self, file: str, path: str) -> None:
+            self.file = file
+            self.path = path
+            self.files = {}
+
+    def _fake_resolve_from_manifest(self, manifest, temp_dir: Path):
+        calls["count"] += 1
+        assert manifest.file == "https://example.invalid/lcu.manifest"
+        assert temp_dir.exists()
+        return VersionInfo(
+            normalized_build="16.5.7518496",
+            patch_version="16.5",
+            exe_version="16.5.751.8496",
+        )
+
+    monkeypatch.setattr(game_factory, "PatcherManifest", _DummyManifest)
+    monkeypatch.setattr(
+        game_factory._LcuVersionResolver,
+        "_resolve_from_manifest",
+        _fake_resolve_from_manifest,
+    )
+
+    resolver = game_factory._LcuVersionResolver()
+    first = resolver.resolve("https://example.invalid/lcu.manifest")
+    second = resolver.resolve("https://example.invalid/lcu.manifest")
+
+    assert first is second
+    assert calls["count"] == 1
+
+
+def test_lcu_version_resolver_supports_macos_plist(monkeypatch: pytest.MonkeyPatch) -> None:
+    import riotmanifest.game.factory as game_factory
+
+    resolver = game_factory._LcuVersionResolver()
+    manifest = object.__new__(PatcherManifest)
+    manifest.file = "https://example.invalid/mac.manifest"
+    manifest.files = {
+        "Contents/LoL/LeagueClient.app/Contents/Info.plist": object(),
+    }
+
+    monkeypatch.setattr(
+        game_factory._LcuVersionResolver,
+        "_download_manifest_file",
+        lambda self, manifest, target_file, temp_dir: b"plist_payload",
+    )
+    monkeypatch.setattr(
+        game_factory._LcuVersionResolver,
+        "_extract_macos_version",
+        lambda self, payload: "16.5.751.8496",
+    )
+
+    version = resolver._resolve_from_manifest(manifest=manifest, temp_dir=Path("/tmp"))
+
+    assert version.normalized_build == "16.5.7518496"
+    assert version.exe_version == "16.5.751.8496"
+
+
+def test_lcu_version_resolver_requires_precise_version_carrier(monkeypatch: pytest.MonkeyPatch) -> None:
+    import riotmanifest.game.factory as game_factory
+
+    resolver = game_factory._LcuVersionResolver()
+    manifest = object.__new__(PatcherManifest)
+    manifest.file = "https://example.invalid/lcu.manifest"
+    manifest.files = {}
+
+    monkeypatch.setattr(
+        game_factory._LcuVersionResolver,
+        "_extract_patch_version_hint",
+        lambda self, manifest, temp_dir: "16.5",
+    )
+    with pytest.raises(LcuVersionUnavailableError, match="只能解析到补丁版本 16.5"):
+        resolver._resolve_from_manifest(manifest=manifest, temp_dir=Path("/tmp"))
+
+    monkeypatch.setattr(
+        game_factory._LcuVersionResolver,
+        "_extract_patch_version_hint",
+        lambda self, manifest, temp_dir: None,
+    )
+    with pytest.raises(LcuVersionUnavailableError, match="不存在可用的 LCU 版本载体"):
+        resolver._resolve_from_manifest(manifest=manifest, temp_dir=Path("/tmp"))
+
+
+def test_list_game_candidates_requires_game_version_set() -> None:
+    import riotmanifest.game.factory as game_factory
+
+    resolver = LeagueManifestResolver()
+    resolver._lcu_data["EUW"] = game_factory._RegionConfigRecord(
+        canonical_region="EUW",
+        patchline="live",
+        lcu_config_id="EUW",
+        launcher_region="EUW",
+        manifest_url="https://example.invalid/lcu-euw.manifest",
+        manifest_id="euw",
+        version_hint="16.5",
+        game_version_set="",
+        game_artifact_type="lol-game-client",
+        game_platform="windows",
+        aliases=("EUW",),
+    )
+    resolver._region_aliases["EUW"] = "EUW"
+
+    with pytest.raises(RegionConfigNotFoundError, match="GAME version-set"):
+        resolver.list_game_candidates("EUW")
+
+
+def test_latest_game_returns_none_for_versionless_manifest() -> None:
+    import riotmanifest.game.factory as game_factory
+
+    resolver = LeagueManifestResolver()
+    resolver._game_data["KR"] = [
+        game_factory.ManifestRef(
+            artifact_group="game",
+            region="KR",
+            source="sieve",
+            url="https://example.invalid/kr.manifest",
+            manifest_id="kr",
+            version=None,
+        )
+    ]
+
+    with pytest.warns(FutureWarning, match=r"latest_game\(\) 已弃用"):
+        assert resolver.latest_game("KR") is None

@@ -11,10 +11,10 @@ from urllib.parse import urlparse
 from riotmanifest.game.factory import (
     ConsistentGameManifestNotFoundError,
     LcuVersionUnavailableError,
-    LiveManifestPair,
+    LeagueManifestError,
     ManifestRef,
+    ResolvedManifestPair,
     ResolvedVersion,
-    RiotGameDataError,
     VersionDisplayMode,
     VersionInfo,
     VersionMatchMode,
@@ -35,7 +35,7 @@ LCU_EXE_PATH = "LeagueClient.exe"
 LCU_MACOS_INFO_PLIST_PATH = "Contents/LoL/LeagueClient.app/Contents/Info.plist"
 
 
-class ManifestInspectionError(RiotGameDataError):
+class ManifestInspectionError(LeagueManifestError):
     """任意 manifest 探测过程中的错误."""
 
 
@@ -51,7 +51,7 @@ class LeagueManifestInspector:
         *sources: StrPath,
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         version_display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
-    ) -> ManifestRef | LiveManifestPair:
+    ) -> ManifestRef | ResolvedManifestPair:
         """按输入数量自动探测单个或两个 manifest.
 
         Args:
@@ -112,7 +112,7 @@ class LeagueManifestInspector:
         *,
         match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         version_display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
-    ) -> LiveManifestPair:
+    ) -> ResolvedManifestPair:
         """探测两个 manifest 并在可配对时返回结果.
 
         Args:
@@ -304,9 +304,9 @@ def _build_live_manifest_pair(
     version_display_mode: VersionDisplayMode,
     is_exact_match: bool,
     match_reason: str,
-) -> LiveManifestPair:
-    """把 Inspector 识别结果组装成 `LiveManifestPair`."""
-    return LiveManifestPair(
+) -> ResolvedManifestPair:
+    """把 Inspector 识别结果组装成 `ResolvedManifestPair`."""
+    return ResolvedManifestPair(
         region=INSPECTION_REGION,
         version=ResolvedVersion(
             lcu=_require_manifest_version(lcu),
