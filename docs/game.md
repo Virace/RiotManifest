@@ -58,7 +58,9 @@
 - `STRICT`
   - LCU 与 GAME 的 `normalized_build` 必须完全一致
 - `IGNORE_REVISION`
-  - 只要求 `patch_version` 一致
+  - 只要求 `patch_version` 一致，并优先选“不高于 LCU build”的最大 GAME 候选
+- `PATCH_LATEST`
+  - 只要求 `patch_version` 一致，并直接选同补丁内最新的 GAME 候选
 
 ### `VersionDisplayMode`
 
@@ -204,7 +206,7 @@ print(pair.version.with_display_mode(VersionDisplayMode.GAME))  # 16.5.7511533
 ```python
 resolve_live_manifest_pair(
     region="EUW",
-    match_mode=VersionMatchMode.STRICT,
+    match_mode=VersionMatchMode.IGNORE_REVISION,
     version_display_mode=VersionDisplayMode.IGNORE_REVISION,
 )
 ```
@@ -215,6 +217,12 @@ resolve_live_manifest_pair(
 
 这是主入口。
 
+注意：
+
+- 方法签名的默认值现在就是 `IGNORE_REVISION`。
+- 如果你只处理资源文件，大多数情况下可以直接不传 `match_mode`。
+- 原因是 Riot live 经常先推进 GAME，再稍后推进 LCU；而 `patchsieve` 只保留当前滚动窗口中的少量 GAME 候选，不是完整历史库。
+
 ### `resolve_live_version(...)`
 
 签名重点：
@@ -222,7 +230,7 @@ resolve_live_manifest_pair(
 ```python
 resolve_live_version(
     region="EUW",
-    match_mode=VersionMatchMode.STRICT,
+    match_mode=VersionMatchMode.IGNORE_REVISION,
     display_mode=VersionDisplayMode.IGNORE_REVISION,
 )
 ```
@@ -277,17 +285,81 @@ resolve_live_version(
 
 找不到就失败，不做隐式回退。
 
+这是“精确 build 校验模式”，不是 live 资源拉取场景的默认推荐模式。
+
+它在 live 场景里大概率失败，常见原因是：
+
+- GAME 修订号往往会先于 LCU 前进
+- `patchsieve` 不保证保留与当前 LCU 完全同 build 的 GAME 条目
+
+一个实测样例（EUW，2026-03-07）：
+
+- LCU：`16.5.751.8496`
+- API 当前可见的 GAME 候选：`16.5.7496037`、`16.5.7511533`、`16.5.7519084`
+- 结果：不存在完全一致的 `16.5.7518496`，因此 `STRICT` 直接失败
+
 ### `IGNORE_REVISION`
 
 规则：
 
 - 只要求 `lcu.version.patch_version == game.version.patch_version`
-- 若同补丁下有多个候选，取最大版本
+- 若同补丁下有多个候选，优先取“不高于 LCU build”的最大 GAME 版本
+- 若同补丁候选全部高于 LCU build，则直接失败
+
+这是本文档在 live 场景中的默认推荐模式。
 
 这个模式适合：
 
 - 同补丁内存在 exe / dll 小修订
+- GAME 修订号快于 LCU，但你仍需要拿当前 live 对应资源
 - 资源文件通常未跟着变化
+
+实测样例（EUW，2026-03-07）：
+
+- LCU：`16.5.751.8496`
+- GAME 候选：`16.5.7496037`、`16.5.7511533`、`16.5.7519084`
+- 当前逻辑会选择：`16.5.7511533`
+- 原因：它是同补丁内“最大且不高于 LCU”的 GAME build
+
+如果你只处理这些内容，通常可以忽略修订号：
+
+- `wad.client`
+- 语言包
+- 贴图
+- 音频
+- 其他资源侧文件
+
+### `PATCH_LATEST`
+
+规则：
+
+- 只要求 `lcu.version.patch_version == game.version.patch_version`
+- 若同补丁下有多个候选，直接取最新的 GAME 版本
+
+这个模式适合：
+
+- 你明确接受“GAME 修订号可以高于 LCU”
+- 你只想拿到当前 patchsieve 暴露的同补丁最新 GAME 候选
+
+实测样例（EUW，2026-03-07）：
+
+- LCU：`16.5.751.8496`
+- GAME 候选：`16.5.7496037`、`16.5.7511533`、`16.5.7519084`
+- `PATCH_LATEST` 会选择：`16.5.7519084`
+- `IGNORE_REVISION` 会选择：`16.5.7511533`
+
+只有在你明确要做这些事情时，才更适合使用 `STRICT`：
+
+- 校验 EXE / DLL 是否与目标 build 完全一致
+- 分析 code-side 二进制修订差异
+- 把“精确 build 命中”本身当作业务前提
+
+## 强烈建议（live 资源场景）
+
+- `RiotGameData` 现在默认就使用 `VersionMatchMode.IGNORE_REVISION`。
+- 如果你的目标是下载 WAD、语言包、贴图、音频等资源，请优先使用 `IGNORE_REVISION`。
+- 如果你明确要“同补丁下最新 GAME”，再显式切到 `PATCH_LATEST`。
+- 如果你坚持使用 `STRICT`，应预期它在 live 窗口期经常抛出 `ConsistentGameManifestNotFoundError`。
 
 ## 推荐调用方式
 
@@ -325,7 +397,16 @@ print(version.with_display_mode(VersionDisplayMode.LCU))
 print(version.with_display_mode(VersionDisplayMode.GAME))
 ```
 
-### 放宽到忽略修订号
+### 默认推荐：使用默认匹配模式
+
+```python
+from riotmanifest import RiotGameData
+
+rgd = RiotGameData()
+pair = rgd.resolve_live_manifest_pair("EUW")
+```
+
+### 如果你要同补丁里的最新 GAME
 
 ```python
 from riotmanifest import RiotGameData, VersionMatchMode
@@ -333,8 +414,29 @@ from riotmanifest import RiotGameData, VersionMatchMode
 rgd = RiotGameData()
 pair = rgd.resolve_live_manifest_pair(
     "EUW",
-    match_mode=VersionMatchMode.IGNORE_REVISION,
+    match_mode=VersionMatchMode.PATCH_LATEST,
 )
+```
+
+### 如果你必须使用 `STRICT`
+
+```python
+from riotmanifest import (
+    ConsistentGameManifestNotFoundError,
+    RiotGameData,
+    VersionMatchMode,
+)
+
+rgd = RiotGameData()
+
+try:
+    pair = rgd.resolve_live_manifest_pair(
+        "EUW",
+        match_mode=VersionMatchMode.STRICT,
+    )
+except ConsistentGameManifestNotFoundError:
+    # live 窗口期这里大概率会触发
+    pair = None
 ```
 
 ## 从旧接口迁移
@@ -353,15 +455,29 @@ game = rgd.latest_game("EUW1")
 
 - 两个 `latest` 的语义不同
 - 补丁窗口期内天然可能不一致
+- 这两个兼容接口当前调用时会发出 `FutureWarning`
+- 计划在 `v3.0.0` 删除
 
 推荐迁移为：
 
 ```python
-pair = rgd.resolve_live_manifest_pair("EUW")
+from riotmanifest import RiotGameData, VersionMatchMode
+
+rgd = RiotGameData()
+pair = rgd.resolve_live_manifest_pair(
+    "EUW",
+    match_mode=VersionMatchMode.IGNORE_REVISION,
+)
 ```
 
 如果只想取版本号：
 
 ```python
-version = rgd.resolve_live_version("EUW")
+from riotmanifest import RiotGameData, VersionMatchMode
+
+rgd = RiotGameData()
+version = rgd.resolve_live_version(
+    "EUW",
+    match_mode=VersionMatchMode.IGNORE_REVISION,
+)
 ```

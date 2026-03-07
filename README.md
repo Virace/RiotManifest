@@ -85,7 +85,7 @@ wad_report = diff_wad_headers(manifest_report=manifest_report)
 ### 4. 获取当前 live 且版本规则明确的一对 LCU / GAME manifest
 
 ```python
-from riotmanifest import RiotGameData, VersionMatchMode
+from riotmanifest import RiotGameData
 
 rgd = RiotGameData()
 pair = rgd.resolve_live_manifest_pair("EUW")
@@ -93,12 +93,17 @@ pair = rgd.resolve_live_manifest_pair("EUW")
 print(str(pair.version))  # 例如 16.5
 print(pair.lcu.url)
 print(pair.game.url)
-
-relaxed_pair = rgd.resolve_live_manifest_pair(
-    "EUW",
-    match_mode=VersionMatchMode.IGNORE_REVISION,
-)
 ```
+
+> 重要：
+> `RiotGameData` 的默认 `match_mode` 现在就是
+> `VersionMatchMode.IGNORE_REVISION`。
+> Riot 的 live 发布经常出现“GAME 先更新、LCU 稍后更新”的窗口期；
+> 同时 `patchsieve` 只暴露当前滚动窗口中的少量 GAME 候选，不是完整历史库。
+> 因此 `STRICT` 要求 `normalized_build` 完全一致，在 live 场景里大概率直接失败。
+> 如果你只处理 `wad.client`、语言包、贴图、音频等资源文件，通常可以忽略修订号，
+> 只按补丁版本匹配。只有在你明确要求 EXE / DLL / build 级完全一致时，
+> 才建议使用 `STRICT` 并自行处理失败。
 
 ## 实践建议
 
@@ -121,8 +126,12 @@ relaxed_pair = rgd.resolve_live_manifest_pair(
 
 ### RiotGameData
 
-- 默认优先使用 `STRICT`，确保 build 级完全一致。
-- 当你明确接受“同补丁内可能只有 exe / dll 修订、资源通常不变”时，再使用 `IGNORE_REVISION`。
+- 默认 `match_mode` 现在就是 `IGNORE_REVISION`。
+- Riot live 常见顺序是 GAME 先更新、LCU 稍后更新，因此 `STRICT` 在 live 场景里大概率失败。
+- 如果你只处理资源文件（如 `wad.client`、语言包、贴图、音频），通常可以忽略修订号。
+- `IGNORE_REVISION` 当前会优先选择“同补丁内不高于 LCU build 的最大 GAME 候选”，避免误选比 LCU 更新的 GAME build。
+- 如果你明确要“同补丁内无条件取最新 GAME 修订”，可改用 `VersionMatchMode.PATCH_LATEST`。
+- 只有在你要求 EXE / DLL / build 级完全一致时，才建议使用 `STRICT`。
 - `str(pair.version)` 默认输出补丁号，例如 `16.5`；如需精确显示，可读取 `pair.version.lcu.display_version` 或 `pair.version.game.display_version`。
 
 ## 文档导航

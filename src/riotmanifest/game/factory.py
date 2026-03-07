@@ -6,6 +6,7 @@ import asyncio
 import plistlib
 import re
 import threading
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from os import PathLike
@@ -36,6 +37,7 @@ class VersionMatchMode(str, Enum):  # noqa: UP042
 
     STRICT = "strict"
     IGNORE_REVISION = "ignore_revision"
+    PATCH_LATEST = "patch_latest"
 
 
 class VersionDisplayMode(str, Enum):  # noqa: UP042
@@ -145,6 +147,26 @@ class ConsistentGameManifestNotFoundError(RiotGameDataError):
     """无法找到满足匹配规则的 GAME manifest 时抛出."""
 
 
+DEPRECATED_LATEST_API_REMOVE_VERSION = "3.0.0"
+
+
+def _warn_deprecated_latest_api(*, api_name: str, replacement: str) -> None:
+    """发出 latest 兼容接口的弃用提示.
+
+    Args:
+        api_name: 被调用的旧接口名。
+        replacement: 推荐替代调用说明。
+    """
+    warnings.warn(
+        (
+            f"RiotGameData.{api_name}() 已弃用，计划在 v{DEPRECATED_LATEST_API_REMOVE_VERSION} 删除。"
+            f"请改用 {replacement}。"
+        ),
+        FutureWarning,
+        stacklevel=3,
+    )
+
+
 def _run_coroutine_sync(coroutine: Any) -> Any:
     """在同步上下文中执行协程，即使当前线程已存在事件循环."""
     try:
@@ -192,6 +214,34 @@ def _build_game_version_info(display_version: str) -> VersionInfo:
         display_version=display_version,
         normalized_build=display_version,
         patch_version=f"{parts[0]}.{parts[1]}",
+    )
+
+
+def _is_not_newer_than_lcu(*, game_version: VersionInfo, lcu_version: VersionInfo) -> bool:
+    """判断 GAME build 是否不高于给定 LCU build.
+
+    Args:
+        game_version: GAME 侧版本信息。
+        lcu_version: LCU 侧版本信息。
+
+    Returns:
+        当 GAME build 小于等于 LCU build 时返回 `True`。
+    """
+    return version_key(game_version.normalized_build) <= version_key(lcu_version.normalized_build)
+
+
+def _select_highest_game_candidate(candidates: list[ManifestRef]) -> ManifestRef:
+    """从 GAME 候选中选出版本号最大的一个.
+
+    Args:
+        candidates: 已保证携带版本信息的 GAME 候选列表。
+
+    Returns:
+        版本号最大的 GAME 候选。
+    """
+    return max(
+        candidates,
+        key=lambda item: version_key(item.version.normalized_build if item.version else ""),
     )
 
 
@@ -355,7 +405,20 @@ class RiotGameData:
             ]
 
     def latest_lcu(self, region: str = "EUW") -> dict[str, str] | None:
-        """获取指定区域当前 live LCU 配置的兼容视图."""
+        """获取指定区域当前 live LCU 配置的兼容视图.
+
+        Deprecated:
+            该兼容接口计划在 `v3.0.0` 删除。请改用
+            `resolve_live_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`
+            或 `get_live_lcu_manifest(...)`。
+        """
+        _warn_deprecated_latest_api(
+            api_name="latest_lcu",
+            replacement=(
+                "resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)"
+                " 或 get_live_lcu_manifest(region)"
+            ),
+        )
         if not self._lcu_data:
             self.load_lcu_data()
 
@@ -368,14 +431,23 @@ class RiotGameData:
         }
 
     def latest_game(self, region: str = "EUW1") -> dict[str, str] | None:
-        """获取指定 version-set 下版本号最大的 GAME 候选."""
+        """获取指定 version-set 下版本号最大的 GAME 候选.
+
+        Deprecated:
+            该兼容接口计划在 `v3.0.0` 删除。请改用
+            `resolve_live_manifest_pair(..., match_mode=VersionMatchMode.PATCH_LATEST)`。
+        """
+        _warn_deprecated_latest_api(
+            api_name="latest_game",
+            replacement="resolve_live_manifest_pair(region, match_mode=VersionMatchMode.PATCH_LATEST)",
+        )
         if region not in self._game_data:
             self.load_game_data(regions=[region])
 
         releases = self._game_data.get(region)
         if not releases:
             return None
-        latest = max(releases, key=lambda item: version_key(item.version.display_version if item.version else ""))
+        latest = _select_highest_game_candidate(releases)
         if latest.version is None:
             return None
         return {
@@ -457,7 +529,7 @@ class RiotGameData:
         self,
         region: str = "EUW",
         *,
-        match_mode: VersionMatchMode = VersionMatchMode.STRICT,
+        match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         version_display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
     ) -> LiveManifestPair:
         """解析当前 live 且版本规则明确的一对 LCU/GAME manifest.
@@ -533,10 +605,44 @@ class RiotGameData:
                 f"区域 {region} 未找到与补丁版本 {lcu_version.patch_version} 一致的 GAME manifest"
             )
 
-        selected = max(
-            patch_matches,
-            key=lambda item: version_key(item.version.display_version if item.version else ""),
-        )
+        if match_mode is VersionMatchMode.PATCH_LATEST:
+            selected = _select_highest_game_candidate(patch_matches)
+            return LiveManifestPair(
+                region=region,
+                version=ResolvedVersion(
+                    lcu=lcu_version,
+                    game=selected.version,
+                    display_mode=version_display_mode,
+                ),
+                lcu=lcu_manifest,
+                game=selected,
+                match_mode=match_mode,
+                is_exact_match=bool(
+                    selected.version and selected.version.normalized_build == lcu_version.normalized_build
+                ),
+                match_reason="patch_latest_fallback",
+                candidate_count=len(candidates),
+            )
+
+        # live 实测表明安装器不会优先选择比当前 LCU 更高的 GAME build，
+        # 因此默认宽松模式也必须把候选限制在“同补丁且不高于 LCU”这一安全子集内。
+        compatible_patch_matches = [
+            candidate
+            for candidate in patch_matches
+            if candidate.version
+            and _is_not_newer_than_lcu(
+                game_version=candidate.version,
+                lcu_version=lcu_version,
+            )
+        ]
+        if not compatible_patch_matches:
+            raise ConsistentGameManifestNotFoundError(
+                "区域 "
+                f"{region} 在补丁 {lcu_version.patch_version} 下没有不高于 "
+                f"LCU build {lcu_version.normalized_build} 的 GAME manifest"
+            )
+
+        selected = _select_highest_game_candidate(compatible_patch_matches)
         return LiveManifestPair(
             region=region,
             version=ResolvedVersion(
@@ -556,7 +662,7 @@ class RiotGameData:
         self,
         region: str = "EUW",
         *,
-        match_mode: VersionMatchMode = VersionMatchMode.STRICT,
+        match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         display_mode: VersionDisplayMode = VersionDisplayMode.IGNORE_REVISION,
     ) -> ResolvedVersion:
         """返回当前 live 的统一版本号对象."""
@@ -584,7 +690,7 @@ class RiotGameData:
         region: str = "EUW",
         *,
         manifest_path: StrPath = "",
-        match_mode: VersionMatchMode = VersionMatchMode.STRICT,
+        match_mode: VersionMatchMode = VersionMatchMode.IGNORE_REVISION,
         **extractor_kwargs: Any,
     ) -> WADExtractor:
         """为指定区域当前 live 的一致 GAME manifest 构造 WADExtractor."""
