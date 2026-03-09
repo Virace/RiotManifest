@@ -55,6 +55,63 @@
 - 不会把 Riot 的 `version-set` 细节继续暴露给上层业务
 - 迁移旧代码时也更容易看出“这是用户输入区域”，而不是内部配置 ID
 
+### 当前可用区域（截至 2026-03-09）
+
+`LeagueManifestResolver.available_regions()` 当前会基于 Riot 的 patchlines `clientconfig` 动态产出以下区域：
+
+- `BR`
+- `EUNE`
+- `EUW`
+- `JP`
+- `KR`
+- `LA1`
+- `LA2`
+- `ME1`
+- `NA`
+- `OC1`
+- `PBE`
+- `RU`
+- `SG2`
+- `TR`
+- `TW2`
+- `VN2`
+
+当前常见 alias 中，以下输入会收敛到规范化后的公开区域：
+
+- `BR1 -> BR`
+- `EUN1 -> EUNE`
+- `EUW1 -> EUW`
+- `JP1 -> JP`
+- `NA1 -> NA`
+- `TR1 -> TR`
+- `PBE1 -> PBE`
+
+说明：
+
+- 这里列的是当前 Resolver 能实际解析的输入，不是 Riot Developer 文档里全部平台路由值的原样镜像。
+- 该列表来自运行时读取 `https://clientconfig.rpg.riotgames.com/api/v1/config/public?namespace=keystone.products.league_of_legends.patchlines` 的结果，未来可能随 Riot 上游调整而变化。
+
+### 历史或当前不可用的区域标识
+
+以下标识在 Riot 生态里仍可能出现在旧代码、第三方库、历史 manifest 仓库或 API 路由常量中，但当前 `LeagueManifestResolver` 不会把它们视为可用输入：
+
+- `PH2`
+- `TH2`
+
+当前判断依据：
+
+- Riot Developer LoL 文档仍能看到 `PH2`、`TH2` 这类平台路由值。
+- 第三方项目和历史清单仓库中也仍能看到 `PH2`、`TH2` 对应目录或 API host。
+- 但截至 2026-03-09，Riot patchlines `clientconfig` 中的 LoL live/pbe 配置并未暴露 `PH2`、`TH2`，因此当前 Resolver 无法将它们解析为有效区域。
+
+如果你传入 `PH2` 或 `TH2`，当前会得到 `RegionConfigNotFoundError`。
+
+另一个容易混淆的概念是：
+
+- `SEA`
+
+`SEA` 不是和 `PH2`、`TH2`、`SG2`、`TW2`、`VN2` 同层的 patchline 区域输入。它更常见于 Riot API 的 regional routing 语义或第三方库的分组概念；当前 `LeagueManifestResolver` 也不会接受它作为可解析区域。
+
 ## 两个类分别做什么
 
 ### `LeagueManifestResolver`
