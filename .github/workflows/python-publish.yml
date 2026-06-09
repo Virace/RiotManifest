@@ -1,63 +1,112 @@
-# This workflow will upload a Python Package to PyPI when a release is created
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python#publishing-to-package-registries
-
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
 name: Upload Python Package
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to publish, for example v2.4.1"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   validate-release-source:
+    name: Validate Release Metadata
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Resolve release tag
+        id: input
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            echo "tag_name=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_name=${{ inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout release tag
+        uses: actions/checkout@v6
         with:
+          ref: ${{ steps.input.outputs.tag_name }}
           fetch-depth: 0
 
       - name: Ensure release tag commit comes from main
         run: |
           git fetch origin main --depth=1
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
+          TAG_COMMIT="$(git rev-list -n 1 "${{ steps.input.outputs.tag_name }}")"
+          MAIN_COMMIT="$(git rev-parse origin/main)"
+          echo "tag_commit=${TAG_COMMIT}"
+          echo "main_commit=${MAIN_COMMIT}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${TAG_COMMIT}" != "${MAIN_COMMIT}" ]]; then
+              echo "::error title=非法发布标签::workflow_dispatch 只能发布当前 main HEAD 上的标签"
+              exit 1
+            fi
+          elif ! git merge-base --is-ancestor "${TAG_COMMIT}" "origin/main"; then
             echo "Release tag commit is not from main branch."
-            echo "GITHUB_SHA=$GITHUB_SHA"
             exit 1
           fi
 
+      - name: Ensure tag and pyproject version match
+        id: version
+        run: |
+          TAG_NAME="${{ steps.input.outputs.tag_name }}"
+          TAG_VERSION="${TAG_NAME#v}"
+          PROJECT_VERSION="$(grep -E '^version[[:space:]]*=' pyproject.toml | head -n1 | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/')"
+          if [[ -z "${PROJECT_VERSION}" ]]; then
+            echo "::error title=缺少版本字段::pyproject.toml 中未找到可解析的 version 字段"
+            exit 1
+          fi
+
+          echo "tag_name=${TAG_NAME}"
+          echo "tag_version=${TAG_VERSION}"
+          echo "project_version=${PROJECT_VERSION}"
+
+          if [[ "${PROJECT_VERSION}" != "${TAG_VERSION}" ]]; then
+            echo "::error title=版本不一致::pyproject.toml=${PROJECT_VERSION}, tag=${TAG_NAME}"
+            exit 1
+          fi
+
+          echo "version=${PROJECT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
   release-build:
+    name: Build Distributions
     runs-on: ubuntu-latest
     needs:
       - validate-release-source
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - name: Checkout release tag
+        uses: actions/checkout@v6
         with:
-          python-version: "3.x"
+          ref: ${{ needs.validate-release-source.outputs.tag_name }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Build release distributions
         run: |
-          # NOTE: put your own distribution build steps here.
           python -m pip install build
           python -m build
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-dists
           path: dist/
 
   pypi-publish:
+    name: Publish to PyPI (Trusted Publishing)
     runs-on: ubuntu-latest
     needs:
       - validate-release-source
@@ -70,16 +119,11 @@ jobs:
     # For more information, see: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#deployment-protection-rules
     environment:
       name: pypi
-      # OPTIONAL: uncomment and update to include your PyPI project URL in the deployment status:
-      # url: https://pypi.org/p/YOURPROJECT
-      #
-      # ALTERNATIVE: if your GitHub Release name is the PyPI project version string
-      # ALTERNATIVE: exactly, uncomment the following line instead:
-      # url: https://pypi.org/project/YOURPROJECT/${{ github.event.release.name }}
+      url: https://pypi.org/project/riotmanifest/${{ needs.validate-release-source.outputs.version }}/
 
     steps:
       - name: Retrieve release distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-dists
           path: dist/
