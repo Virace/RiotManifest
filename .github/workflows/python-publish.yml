@@ -44,12 +44,7 @@ jobs:
           MAIN_COMMIT="$(git rev-parse origin/main)"
           echo "tag_commit=${TAG_COMMIT}"
           echo "main_commit=${MAIN_COMMIT}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ "${TAG_COMMIT}" != "${MAIN_COMMIT}" ]]; then
-              echo "::error title=非法发布标签::workflow_dispatch 只能发布当前 main HEAD 上的标签"
-              exit 1
-            fi
-          elif ! git merge-base --is-ancestor "${TAG_COMMIT}" "origin/main"; then
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" "origin/main"; then
             echo "Release tag commit is not from main branch."
             exit 1
           fi
