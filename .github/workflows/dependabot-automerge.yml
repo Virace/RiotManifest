@@ -38,16 +38,41 @@ jobs:
             });
 
             const title = data.title || '';
+            const runtimeDependencies = new Set([
+              'aiohttp',
+              'blake3',
+              'league-tools',
+              'loguru',
+              'pyzstd',
+              'urllib3',
+            ]);
+            const dependencyMatch = title.match(/\bbump\s+([^\s]+)\s+from\b/i);
+            const dependencyName = dependencyMatch?.[1]?.toLowerCase();
+            const isRuntimeDependencyUpdate =
+              title.startsWith('chore(deps):') &&
+              !title.startsWith('chore(deps-dev):');
+            const isRuntimeGroupUpdate =
+              data.head.ref.includes('/runtime-dependencies') ||
+              title.toLowerCase().includes('runtime-dependencies');
             const versionMatch = title.match(/\bfrom\s+v?(\d+)(?:\.\d+)*\s+to\s+v?(\d+)(?:\.\d+)*/i);
-            const majorUpdate = !versionMatch || versionMatch[1] !== versionMatch[2];
+            const majorUpdate = versionMatch ? versionMatch[1] !== versionMatch[2] : false;
+            const isAllowedRuntimeSingleUpdate =
+              dependencyName !== undefined &&
+              runtimeDependencies.has(dependencyName) &&
+              versionMatch !== null;
             const eligible =
               data.user?.login === 'dependabot[bot]' &&
               data.base.ref === 'main' &&
               data.head.ref.startsWith('dependabot/') &&
+              isRuntimeDependencyUpdate &&
+              (isRuntimeGroupUpdate || isAllowedRuntimeSingleUpdate) &&
               data.mergeable_state !== 'dirty' &&
               !majorUpdate;
 
             core.info(`title=${title}`);
+            core.info(`dependency_name=${dependencyName}`);
+            core.info(`runtime_dependency_update=${isRuntimeDependencyUpdate}`);
+            core.info(`runtime_group_update=${isRuntimeGroupUpdate}`);
             core.info(`major_update=${majorUpdate}`);
             core.setOutput('eligible', eligible ? 'true' : 'false');
             core.setOutput('number', String(data.number));

@@ -14,6 +14,28 @@ updates:
       prefix: "chore"
       prefix-development: "chore"
       include: "scope"
+    groups:
+      runtime-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "aiohttp"
+          - "blake3"
+          - "league-tools"
+          - "loguru"
+          - "pyzstd"
+          - "urllib3"
+        update-types:
+          - "minor"
+          - "patch"
+      development-dependencies:
+        applies-to: version-updates
+        patterns:
+          - "pytest"
+          - "pytest-cov"
+          - "ruff"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"

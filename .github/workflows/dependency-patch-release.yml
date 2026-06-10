@@ -79,9 +79,9 @@ jobs:
 
           SUBJECT="$(git log -1 --pretty=%s)"
           echo "subject=${SUBJECT}"
-          if [[ "${SUBJECT}" != chore\(deps* ]]; then
+          if [[ "${SUBJECT}" != chore\(deps\):* ]]; then
             echo "eligible=false" >> "$GITHUB_OUTPUT"
-            echo "Latest commit is not a dependency update commit."
+            echo "Latest commit is not a runtime dependency update commit."
             exit 0
           fi
 
