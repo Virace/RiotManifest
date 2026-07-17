@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import Union
 
@@ -27,7 +28,5 @@ def commit_staging(output: StrPath) -> None:
 
 def discard_staging(output: StrPath) -> None:
     """删除 staging 文件；不存在时静默."""
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.remove(staging_path(output))
-    except FileNotFoundError:
-        pass

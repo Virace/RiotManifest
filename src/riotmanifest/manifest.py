@@ -15,7 +15,6 @@ from typing import BinaryIO, Union
 from urllib.parse import urljoin, urlparse
 
 import pyzstd
-from loguru import logger
 
 from riotmanifest.core.binary_parser import BinaryParser
 from riotmanifest.core.chunk_hash import (
