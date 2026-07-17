@@ -7,25 +7,23 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Union
 
 from riotmanifest.core.chunk_hash import compute_chunk_hash
+from riotmanifest.downloader.scheduler import ChunkEntry, iter_chunk_entries
 
 if TYPE_CHECKING:
-    from riotmanifest.manifest import PatcherChunk, PatcherFile
+    from riotmanifest.manifest import PatcherFile
 
 StrPath = Union[str, "os.PathLike[str]"]
 
-
-@dataclass(slots=True)
-class ChunkEntry:
-    """(文件, chunk, 文件内解压域偏移) 三元组，验证与调度共享的最小单元."""
-
-    file: PatcherFile
-    chunk: PatcherChunk
-    file_offset: int
+__all__ = [
+    "ChunkEntry",
+    "FileVerifyResult",
+    "iter_chunk_entries",
+    "verify_file_chunks",
+]
 
 
 @dataclass(slots=True)
@@ -46,14 +44,6 @@ class FileVerifyResult:
     def reused_bytes(self) -> int:
         """命中块的解压域字节数合计."""
         return sum(entry.chunk.target_size for entry in self.hits)
-
-
-def iter_chunk_entries(file: PatcherFile) -> Iterator[ChunkEntry]:
-    """按 chunks 顺序累加 target_size，产出每个 chunk 的文件内写入偏移."""
-    file_offset = 0
-    for chunk in file.chunks:
-        yield ChunkEntry(file=file, chunk=chunk, file_offset=file_offset)
-        file_offset += chunk.target_size
 
 
 def verify_file_chunks(file: PatcherFile, path: StrPath) -> FileVerifyResult:
