@@ -56,7 +56,21 @@ if __name__ == "__main__":
 - 入口：`PatcherManifest`
 - 适合：批量下载 `wad.client`、语言资源、配置文件
 
-### 2. 从 WAD 中按需提取少量文件
+### 2. 增量更新 / 修复本地文件
+
+```python
+from riotmanifest import ManifestUpdater
+
+updater = ManifestUpdater(manifest)  # 旧清单自动从本地存档解析
+result = await updater.sync(files)
+print(result.downloaded_bytes, result.reused_bytes)
+```
+
+- 本地已有数据逐 chunk 验证复用，只下载变化部分
+- 首次运行自动退化为全量；成功后清单自动存档，下次即增量
+- 详见 [docs/update.md](docs/update.md)
+
+### 3. 从 WAD 中按需提取少量文件
 
 ```python
 from riotmanifest import PatcherManifest, WADExtractor
@@ -73,7 +87,7 @@ data = extractor.extract_files(
 )
 ```
 
-### 3. 比较两个版本的 manifest / WAD 差异
+### 4. 比较两个版本的 manifest / WAD 差异
 
 ```python
 from riotmanifest import diff_manifests, diff_wad_headers
@@ -82,7 +96,7 @@ manifest_report = diff_manifests(old_manifest, new_manifest, flags="zh_CN", patt
 wad_report = diff_wad_headers(manifest_report=manifest_report)
 ```
 
-### 4. 获取当前 live 且版本规则明确的一对 LCU / GAME manifest
+### 5. 获取当前 live 且版本规则明确的一对 LCU / GAME manifest
 
 ```python
 from riotmanifest import LeagueManifestResolver
@@ -106,7 +120,7 @@ print(pair.game.url)
 > 才建议使用 `STRICT` 并自行处理失败。
 > 旧类名 `RiotGameData` 仍保留为兼容别名，实例化时会发出 `FutureWarning`。
 
-### 5. 判断单个或两个英雄联盟 manifest 的类型与版本
+### 6. 判断单个或两个英雄联盟 manifest 的类型与版本
 
 ```python
 from riotmanifest import LeagueManifestInspector
@@ -170,6 +184,7 @@ print(str(pair.version))  # 16.5
 
 - [docs/API.md](docs/API.md)：文档导航页
 - [docs/manifest.md](docs/manifest.md)：Manifest 下载参考
+- [docs/update.md](docs/update.md)：增量更新参考
 - [docs/extractor.md](docs/extractor.md)：WADExtractor 参考
 - [docs/diff.md](docs/diff.md)：差异分析参考
 - [docs/game.md](docs/game.md)：LeagueManifestResolver / LeagueManifestInspector / 版本对象参考
