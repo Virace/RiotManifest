@@ -71,9 +71,24 @@ if __name__ == "__main__":
 
 ## `SyncMode`
 
-- `AUTO`（默认）：上表语义。
-- `VERIFY_ONLY`：只验证并报告缺失量，不写盘、不下载、不存档（dry-run）。
+- `AUTO`（默认）：上表语义。注意：被文件级跳过的文件不做本地验证
+  （rman `--update` 同款权衡），怀疑本地损坏时用 `REPAIR`。
+- `REPAIR`：不做文件级跳过，对全部目标文件逐 chunk 验证并补洞（修复）。
+- `VERIFY_ONLY`：不做文件级跳过，只验证并报告缺失量，不写盘、不下载、不存档（dry-run）。
 - `FORCE_FULL`：跳过一切验证，强制全量重下。
+
+与 rman 的对应关系：`AUTO`≈`rman-dl --update`、`REPAIR`≈`rman-dl` 默认、
+`VERIFY_ONLY`≈`--no-write`、`FORCE_FULL`≈`--no-verify`。
+
+## 哈希类型的两个细节
+
+- 清单中部分文件没有 params 条目（hash_type=0），但 chunk_id 仍是内容哈希。
+  本地验证会对这类 chunk 穷举猜测算法（对齐 rman 的 `RChunk::hash_type`），
+  命中即复用，不会盲目重下。
+- Riot 会跨版本迁移哈希算法（实测 16.3 HKDF → 16.4 BLAKE3）。迁移边界上
+  chunk_id 全部变化，文件级判同必然失效，但只要内容没变，
+  猜测验证仍能 100% 复用本地数据（`scripts/e2e_update_real.py` 实测下载 0 字节）。
+  内部 diff 使用 `strict` 模式，避免这类文件被误判为未变化。
 
 ## `UpdateResult`
 

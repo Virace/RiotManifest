@@ -13,12 +13,17 @@ if TYPE_CHECKING:
 class SyncMode(Enum):
     """同步模式.
 
-    - AUTO：默认。存在即验证补洞，有旧清单时自动跳过未变化文件。
-    - VERIFY_ONLY：只验证并报告，不写盘、不下载、不存档（dry-run）。
+    - AUTO：默认。逐文件验证补洞，有旧清单（显式或存档）时自动跳过未变化文件。
+      注意：被跳过的文件不做本地验证（rman `--update` 同款权衡），
+      怀疑本地损坏时请用 REPAIR。
+    - REPAIR：不做文件级跳过，对全部目标文件逐 chunk 验证并补洞（修复）。
+    - VERIFY_ONLY：不做文件级跳过，只验证并报告缺失量，
+      不写盘、不下载、不存档（dry-run）。
     - FORCE_FULL：跳过一切验证，强制全量重下。
     """
 
     AUTO = "auto"
+    REPAIR = "repair"
     VERIFY_ONLY = "verify_only"
     FORCE_FULL = "force_full"
 

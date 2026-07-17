@@ -220,6 +220,61 @@ def test_partial_failure_keeps_old_file_and_state(tmp_path: Path):
     assert ManifestArchive(tmp_path).load_installed() is None
 
 
+def test_repair_mode_fixes_corruption_auto_skips(tmp_path: Path):
+    """AUTO 对未变化文件跳过验证（rman --update 权衡）；REPAIR 逐文件验证修复."""
+    d1, d2 = b"aaaa", b"bbbb"
+    old = _make_manifest(tmp_path)
+    _add_file(old, "a.bin", [d1, d2])
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    _add_file(new, "a.bin", [d1, d2])
+    # 本地第二个 chunk 损坏。
+    _write_local(tmp_path, "a.bin", d1 + b"XXXX")
+
+    downloaded = _install_fake_network(new, [d2])
+    updater = ManifestUpdater(new, old_manifest=old)
+
+    result_auto = asyncio.run(updater.sync())
+    assert result_auto.actions["a.bin"] == FileAction.SKIP
+    assert (tmp_path / "a.bin").read_bytes() == d1 + b"XXXX"
+    assert downloaded == []
+
+    result_repair = asyncio.run(updater.sync(mode=SyncMode.REPAIR))
+    assert result_repair.actions["a.bin"] == FileAction.PATCH
+    assert downloaded == [_chunk_id(d2)]
+    assert result_repair.downloaded_bytes == 4
+    assert result_repair.reused_bytes == 4
+    assert (tmp_path / "a.bin").read_bytes() == d1 + d2
+
+
+def test_hash_type_migration_same_size_is_patched(tmp_path: Path):
+    """哈希类型跨版本迁移 + 大小恰好相同的变更文件必须判 PATCH（Alistar 回归）.
+
+    真实案例：16.3(HKDF) → 16.4(BLAKE3/无 params) 迁移中，
+    diff 的 loose 模式会跳过 chunk 比较并把该文件误判 unchanged。
+    """
+    d1, d2_old, d2_new = b"aaaa", b"bbbb", b"cccc"
+
+    old = _make_manifest(tmp_path)
+    _add_file(old, "a.bin", [d1, d2_old])
+
+    # 新清单：内容变化但总大小相同，且 chunk_hash_types 为空（hash_type=0）。
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    file_new = _add_file(new, "a.bin", [d1, d2_new])
+    file_new.chunk_hash_types = {}
+
+    _write_local(tmp_path, "a.bin", d1 + d2_old)
+    downloaded = _install_fake_network(new, [d2_new])
+
+    updater = ManifestUpdater(new, old_manifest=old)
+    result = asyncio.run(updater.sync())
+
+    assert result.actions["a.bin"] == FileAction.PATCH
+    assert downloaded == [_chunk_id(d2_new)]
+    # 未变化的 d1 由猜测验证命中复用。
+    assert result.reused_bytes == 4
+    assert (tmp_path / "a.bin").read_bytes() == d1 + d2_new
+
+
 def test_successful_sync_archives_manifest(tmp_path: Path):
     d1 = b"aaaa"
     new = _make_manifest(tmp_path, manifest_id=0xABCD, raw=b"raw-manifest")

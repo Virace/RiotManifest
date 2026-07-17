@@ -94,11 +94,21 @@ class ManifestUpdater:
         target_files = list(files) if files is not None else list(manifest.files.values())
         verify_only = mode is SyncMode.VERIFY_ONLY
 
+        # 只有 AUTO 使用旧清单做文件级跳过；REPAIR/VERIFY_ONLY 逐文件验证，
+        # FORCE_FULL 跳过一切验证。
         report = None
-        if mode is not SyncMode.FORCE_FULL:
+        if mode is SyncMode.AUTO:
             old = self._resolve_old_manifest()
             if old is not None:
-                report = diff_manifests(old, manifest, include_unchanged=True, detect_moves=True)
+                # strict：哈希类型跨版本迁移（如 16.3 HKDF → 16.4 BLAKE3）时，
+                # loose 会跳过 chunk 比较，大小恰好相同的变更文件会被误判 unchanged。
+                report = diff_manifests(
+                    old,
+                    manifest,
+                    include_unchanged=True,
+                    detect_moves=True,
+                    hash_type_mismatch_mode="strict",
+                )
         plan = build_update_plan(report, target_files)
 
         actions = {entry.path: entry.action for entry in plan.entries}

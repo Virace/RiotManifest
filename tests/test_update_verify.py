@@ -114,12 +114,25 @@ def test_verify_short_file_tail_miss(tmp_path: Path):
     assert [entry.file_offset for entry in result.misses] == [4]
 
 
-def test_verify_unknown_hash_type_is_miss(tmp_path: Path):
+def test_verify_unknown_hash_type_guesses_algorithm(tmp_path: Path):
     manifest = _make_manifest(tmp_path)
-    # chunk_hash_types 置空：hash_type 缺省为 0，无法确认即 miss。
+    # chunk_hash_types 置空：hash_type 缺省为 0，穷举猜测算法后仍可命中。
     file = _make_file(manifest, "a.bin", [b"aaaa"], hash_types={})
     local = tmp_path / "a.bin"
     local.write_bytes(b"aaaa")
+
+    result = verify_file_chunks(file, local)
+
+    assert len(result.hits) == 1
+    assert result.misses == []
+
+
+def test_verify_unknown_hash_type_mismatch_is_miss(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    file = _make_file(manifest, "a.bin", [b"aaaa"], hash_types={})
+    local = tmp_path / "a.bin"
+    # 内容与 chunk_id 无法通过任何算法对上 → miss。
+    local.write_bytes(b"XXXX")
 
     result = verify_file_chunks(file, local)
 

@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Union
 
-from riotmanifest.core.chunk_hash import compute_chunk_hash
+from riotmanifest.core.chunk_hash import compute_chunk_hash, guess_chunk_hash_type
 from riotmanifest.downloader.scheduler import ChunkEntry, iter_chunk_entries
 
 if TYPE_CHECKING:
@@ -49,7 +49,9 @@ class FileVerifyResult:
 def verify_file_chunks(file: PatcherFile, path: StrPath) -> FileVerifyResult:
     """对本地文件按新清单布局做固定位置逐块验证.
 
-    文件不存在 → 全部 miss；hash_type 未知（0）或区间越界 → miss；
+    文件不存在 → 全部 miss；区间越界 → miss；
+    hash_type 未知（0）时穷举猜测算法（清单常见无 params 条目的文件，
+    chunk_id 仍是内容哈希，对齐 rman 的做法），全不命中才算 miss；
     同一 chunk_id 出现在多个位置时按位置独立判定。
 
     Args:
@@ -70,13 +72,17 @@ def verify_file_chunks(file: PatcherFile, path: StrPath) -> FileVerifyResult:
         for entry in entries:
             chunk = entry.chunk
             hash_type = file.chunk_hash_types.get(chunk.chunk_id, 0)
-            if hash_type == 0 or entry.file_offset + chunk.target_size > local_size:
+            if entry.file_offset + chunk.target_size > local_size:
                 misses.append(entry)
                 continue
             f.seek(entry.file_offset)
             data = f.read(chunk.target_size)
-            if len(data) == chunk.target_size and compute_chunk_hash(data, hash_type) == chunk.chunk_id:
-                hits.append(entry)
-            else:
+            if len(data) != chunk.target_size:
                 misses.append(entry)
+                continue
+            if hash_type == 0:
+                matched = guess_chunk_hash_type(data, chunk.chunk_id) is not None
+            else:
+                matched = compute_chunk_hash(data, hash_type) == chunk.chunk_id
+            (hits if matched else misses).append(entry)
     return FileVerifyResult(file=file, exists=True, hits=hits, misses=misses)
