@@ -250,6 +250,9 @@ class PatcherManifest:
         self.chunks: dict[int, PatcherChunk] = {}
         self.flags: dict[int, str] = {}
         self.files: dict[str, PatcherFile] = {}
+        # 清单原始字节与 ID：供增量更新的存档（ManifestArchive）使用。
+        self.raw_bytes: bytes | None = None
+        self.manifest_id: int = 0
 
         self.path = path
         self.bundle_url = bundle_url
@@ -267,12 +270,15 @@ class PatcherManifest:
         parsed_url = urlparse(file_ref)
 
         if parsed_url.scheme and parsed_url.netloc:
-            self.parse_rman(io.BytesIO(http_get_bytes(file_ref)))
+            raw = http_get_bytes(file_ref)
         elif os.path.isfile(file_ref):
             with open(file_ref, "rb") as f:
-                self.parse_rman(f)
+                raw = f.read()
         else:
             raise ValueError("file error")
+
+        self.raw_bytes = raw
+        self.parse_rman(io.BytesIO(raw))
 
     def file_output(self, file: PatcherFile) -> str:
         """返回目标文件的绝对输出路径."""
@@ -375,7 +381,8 @@ class PatcherManifest:
         if (version_major, version_minor) not in ((2, 0), (2, 1)):
             raise ValueError(f"unsupported RMAN version: {version_major}.{version_minor}")
 
-        flags, offset, length, _manifest_id, _body_length = parser.unpack("<HLLQL")
+        flags, offset, length, manifest_id, _body_length = parser.unpack("<HLLQL")
+        self.manifest_id = manifest_id
         if not flags & (1 << 9):
             raise ValueError(f"unsupported RMAN flags: {flags:#06x}")
         if offset != parser.tell():
