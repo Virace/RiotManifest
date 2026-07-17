@@ -22,6 +22,7 @@ from loguru import logger
 
 from riotmanifest.core.errors import BundleJobFailure, DecompressError, DownloadBatchError, DownloadError
 from riotmanifest.downloader.file_pool import FileHandlePool
+from riotmanifest.downloader.staging import commit_staging, discard_staging, staging_path
 
 
 @dataclass(frozen=True)
@@ -429,7 +430,7 @@ class DownloadScheduler:
                             f"解压大小不匹配: chunk_id={chunk.chunk_id}, expected={target.expected_len}, actual={len(data)}"
                         )
 
-                    output = self.manifest.file_output(target.file)
+                    output = staging_path(self.manifest.file_output(target.file))
                     await asyncio.to_thread(file_pool.write_at, output, data, target.file_offset)
 
     async def run_bundle_job_with_retry(
@@ -457,6 +458,20 @@ class DownloadScheduler:
         raise DownloadError(
             f"bundle任务失败: bundle_id={job.bundle_id}, retries={self.manifest.max_retries}, error={last_error}"
         )
+
+    def _finalize_staging(
+        self,
+        pending_files: list[PatcherFile],
+        failed_bundle_ids: set[int],
+    ) -> None:
+        """批次收尾：成功文件提交 staging，失败文件丢弃 staging 并保留旧文件."""
+        for file in pending_files:
+            output = self.manifest.file_output(file)
+            has_failed_chunk = any(chunk.bundle.bundle_id in failed_bundle_ids for chunk in file.chunks)
+            if has_failed_chunk:
+                discard_staging(output)
+            else:
+                commit_staging(output)
 
     def _build_results(
         self,
@@ -521,20 +536,17 @@ class DownloadScheduler:
                 seen_files[file.name] = file
                 ordered_files.append(file)
 
-        pending_files: list[PatcherFile] = []
-        for file in ordered_files:
-            if file.link:
-                continue
-            output = self.manifest.file_output(file)
-            if not self.manifest.is_complete_file(file, output):
-                self.manifest.preallocate_file(file)
-                pending_files.append(file)
+        # 语义为“给什么下什么”：是否跳过由上层（如 update 编排器）决定。
+        pending_files = [file for file in ordered_files if not file.link]
+        for file in pending_files:
+            self.manifest.preallocate_file(file)
 
         if not pending_files:
             return self._build_results(files)
 
         jobs = self.build_bundle_jobs(pending_files)
         if not jobs:
+            self._finalize_staging(pending_files, set())
             return self._build_results(files)
 
         total_jobs = len(jobs)
@@ -647,13 +659,17 @@ class DownloadScheduler:
                 await reporter_task
             await asyncio.to_thread(file_pool.close)
 
+        # 无论批次成败都先收尾 staging：成功文件提交、失败文件丢弃并保留旧文件。
+        failed_bundle_ids = {failure.bundle_id for failure in errors}
+        await asyncio.to_thread(self._finalize_staging, pending_files, failed_bundle_ids)
+
         if errors:
             await self.emit_progress(progress_callback, make_progress("failed"))
             if raise_on_error:
                 raise DownloadBatchError(errors)
             for failure in errors:
                 logger.error(f"bundle下载失败: {failure.bundle_id:016X}, error={failure.error}")
-            return self._build_results(files, failed_bundle_ids={failure.bundle_id for failure in errors})
+            return self._build_results(files, failed_bundle_ids=failed_bundle_ids)
 
         await self.emit_progress(progress_callback, make_progress("completed"))
         return self._build_results(files)

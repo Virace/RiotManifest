@@ -26,6 +26,7 @@ from riotmanifest.core.errors import (
     DownloadError,
 )
 from riotmanifest.downloader.scheduler import DownloadScheduler, ProgressCallback
+from riotmanifest.downloader.staging import staging_path
 from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
 
 RETRY_LIMIT = 5
@@ -142,13 +143,6 @@ class PatcherFile:
 
         lang = langs.lower()
         return lambda f: f.flags is not None and any(f.lower() == lang for f in f.flags)
-
-    def _verify_file(self, path: StrPath) -> bool:
-        """按文件大小进行快速校验."""
-        if os.path.isfile(path) and os.path.getsize(path) == self.size:
-            logger.info(f"{self.name}，校验通过")
-            return True
-        return False
 
     async def download_file(
         self,
@@ -291,10 +285,14 @@ class PatcherManifest:
         return os.path.isfile(output) and os.path.getsize(output) == file.size
 
     def preallocate_file(self, file: PatcherFile):
-        """预分配目标文件，提前占位避免并发写入时多次创建."""
+        """在 staging 临时文件上预分配目标大小.
+
+        提交（原子替换）前不触碰目标路径上的已有文件，
+        使其在整个下载过程中保持完整、可作为本地数据复用来源。
+        """
         output = self.file_output(file)
         os.makedirs(os.path.dirname(output), exist_ok=True)
-        with open(output, "wb") as f:
+        with open(staging_path(output), "wb") as f:
             f.truncate(file.size)
 
     def validate_chunk_hash(self, chunk_data: bytes, chunk_id: int, hash_type: int) -> None:

@@ -10,6 +10,12 @@ from riotmanifest.downloader.scheduler import (
     ProgressCallback,
     WriteTarget,
 )
+from riotmanifest.downloader.staging import (
+    STAGING_SUFFIX,
+    commit_staging,
+    discard_staging,
+    staging_path,
+)
 
 __all__ = [
     "FileHandlePool",
@@ -20,4 +26,8 @@ __all__ = [
     "DownloadScheduler",
     "DownloadProgress",
     "ProgressCallback",
+    "STAGING_SUFFIX",
+    "staging_path",
+    "commit_staging",
+    "discard_staging",
 ]
