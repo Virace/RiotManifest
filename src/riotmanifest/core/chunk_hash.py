@@ -49,6 +49,28 @@ def compute_chunk_hash(chunk_data: bytes, hash_type: int) -> int | None:
     raise DecompressError(f"不支持的 Chunk 哈希类型: {hash_type}")
 
 
+def guess_chunk_hash_type(chunk_data: bytes, chunk_id: int) -> int | None:
+    """对未知 hash_type 的 chunk 穷举猜测算法（对齐 rman 的 RChunk::hash_type）.
+
+    清单中部分文件没有 params 条目（hash_type=0），但 chunk_id 仍是内容哈希；
+    逐一试算法并与 chunk_id 比对，命中即返回类型，全不命中返回 None。
+
+    Args:
+        chunk_data: 解压后的 chunk 数据。
+        chunk_id: 清单声明的 chunk_id。
+
+    Returns:
+        命中的 hash_type；无法确认时返回 None。
+    """
+    candidates = [HASH_TYPE_HKDF, HASH_TYPE_BLAKE3, HASH_TYPE_SHA256, HASH_TYPE_SHA512]
+    for hash_type in candidates:
+        if hash_type == HASH_TYPE_BLAKE3 and blake3 is None:
+            continue
+        if compute_chunk_hash(chunk_data, hash_type) == chunk_id:
+            return hash_type
+    return None
+
+
 def validate_chunk_hash(chunk_data: bytes, chunk_id: int, hash_type: int) -> None:
     """校验解压后的 chunk 数据哈希是否与 chunk_id 一致."""
     computed = compute_chunk_hash(chunk_data, hash_type)

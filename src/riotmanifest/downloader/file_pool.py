@@ -89,6 +89,24 @@ class FileHandlePool:
         finally:
             self._release(entry)
 
+    def close_path(self, path: StrPath):
+        """关闭并移出指定路径的句柄（不存在时静默）.
+
+        Windows 下句柄未关闭时对该文件执行 `os.replace` 会失败，
+        原子替换前必须先调用本方法。
+        """
+        norm_path = os.fspath(path)
+        entry: _HandleEntry | None = None
+        with self._lock:
+            entry = self._handles.pop(norm_path, None)
+            if entry is not None:
+                entry.evicted = True
+                if entry.refs != 0:
+                    # 使用中，由 _release 在引用归零时收尾。
+                    entry = None
+        if entry is not None:
+            self._close_entry(entry)
+
     def close(self):
         """关闭并清空池内所有句柄."""
         to_close: list[_HandleEntry] = []

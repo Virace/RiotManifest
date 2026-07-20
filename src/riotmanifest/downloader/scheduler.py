@@ -11,7 +11,7 @@ import inspect
 import math
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
@@ -22,6 +22,7 @@ from loguru import logger
 
 from riotmanifest.core.errors import BundleJobFailure, DecompressError, DownloadBatchError, DownloadError
 from riotmanifest.downloader.file_pool import FileHandlePool
+from riotmanifest.downloader.staging import commit_staging, discard_staging, staging_path
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,23 @@ class GlobalChunkTask:
     targets: list[WriteTarget] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class ChunkEntry:
+    """(文件, chunk, 文件内解压域偏移) 三元组，验证与调度共享的最小单元."""
+
+    file: PatcherFile
+    chunk: PatcherChunk
+    file_offset: int
+
+
+def iter_chunk_entries(file: PatcherFile) -> Iterator[ChunkEntry]:
+    """按 chunks 顺序累加 target_size，产出每个 chunk 的文件内写入偏移."""
+    file_offset = 0
+    for chunk in file.chunks:
+        yield ChunkEntry(file=file, chunk=chunk, file_offset=file_offset)
+        file_offset += chunk.target_size
+
+
 @dataclass
 class ChunkRange:
     """Bundle 内单段 Range 请求定义."""
@@ -98,33 +116,39 @@ class DownloadScheduler:
         """
         self.manifest = manifest
 
-    def build_global_task_map(self, files: list[PatcherFile]) -> dict[int, list[GlobalChunkTask]]:
+    def build_global_task_map(
+        self,
+        files: list[PatcherFile],
+        *,
+        entries: Iterable[ChunkEntry] | None = None,
+    ) -> dict[int, list[GlobalChunkTask]]:
         """按 ChunkID 去重并构建全局任务映射.
 
         Args:
             files: 需要下载的目标文件列表。
+            entries: 预构建的 chunk 条目；给定时仅对条目建任务（`files` 被忽略），
+                用于增量场景只下载 miss 的 chunk。
 
         Returns:
             以 bundle_id 分组的任务映射。
         """
-        chunk_index: dict[int, GlobalChunkTask] = {}
+        if entries is None:
+            entries = (entry for file in files for entry in iter_chunk_entries(file))
 
-        for file in files:
-            file_offset = 0
-            # 一个文件由多个 chunk 拼接，记录每个 chunk 在目标文件中的写入偏移。
-            for chunk in file.chunks:
-                target = WriteTarget(
-                    file=file,
-                    file_offset=file_offset,
-                    expected_len=chunk.target_size,
-                    chunk_id=chunk.chunk_id,
-                    hash_type=file.chunk_hash_types.get(chunk.chunk_id, 0),
-                )
-                if chunk.chunk_id in chunk_index:
-                    chunk_index[chunk.chunk_id].targets.append(target)
-                else:
-                    chunk_index[chunk.chunk_id] = GlobalChunkTask(chunk=chunk, targets=[target])
-                file_offset += chunk.target_size
+        chunk_index: dict[int, GlobalChunkTask] = {}
+        for entry in entries:
+            chunk = entry.chunk
+            target = WriteTarget(
+                file=entry.file,
+                file_offset=entry.file_offset,
+                expected_len=chunk.target_size,
+                chunk_id=chunk.chunk_id,
+                hash_type=entry.file.chunk_hash_types.get(chunk.chunk_id, 0),
+            )
+            if chunk.chunk_id in chunk_index:
+                chunk_index[chunk.chunk_id].targets.append(target)
+            else:
+                chunk_index[chunk.chunk_id] = GlobalChunkTask(chunk=chunk, targets=[target])
 
         bundle_map: dict[int, list[GlobalChunkTask]] = {}
         for task in chunk_index.values():
@@ -165,9 +189,14 @@ class DownloadScheduler:
         ranges.append(ChunkRange(start=start, end=end, tasks=current_tasks))
         return ranges
 
-    def build_bundle_jobs(self, files: list[PatcherFile]) -> list[BundleJob]:
-        """把文件列表转换为 bundle 维度的下载作业列表."""
-        bundle_map = self.build_global_task_map(files)
+    def build_bundle_jobs(
+        self,
+        files: list[PatcherFile],
+        *,
+        entries: Iterable[ChunkEntry] | None = None,
+    ) -> list[BundleJob]:
+        """把文件列表（或预构建 chunk 条目）转换为 bundle 维度的下载作业列表."""
+        bundle_map = self.build_global_task_map(files, entries=entries)
         jobs: list[BundleJob] = []
 
         for bundle_id, tasks in bundle_map.items():
@@ -429,7 +458,7 @@ class DownloadScheduler:
                             f"解压大小不匹配: chunk_id={chunk.chunk_id}, expected={target.expected_len}, actual={len(data)}"
                         )
 
-                    output = self.manifest.file_output(target.file)
+                    output = staging_path(self.manifest.file_output(target.file))
                     await asyncio.to_thread(file_pool.write_at, output, data, target.file_offset)
 
     async def run_bundle_job_with_retry(
@@ -457,6 +486,19 @@ class DownloadScheduler:
         raise DownloadError(
             f"bundle任务失败: bundle_id={job.bundle_id}, retries={self.manifest.max_retries}, error={last_error}"
         )
+
+    def _finalize_staging(
+        self,
+        pending_files: list[PatcherFile],
+        failed_paths: set[str],
+    ) -> None:
+        """批次收尾：成功文件提交 staging，失败文件丢弃 staging 并保留旧文件."""
+        for file in pending_files:
+            output = self.manifest.file_output(file)
+            if file.name in failed_paths:
+                discard_staging(output)
+            else:
+                commit_staging(output)
 
     def _build_results(
         self,
@@ -521,22 +563,110 @@ class DownloadScheduler:
                 seen_files[file.name] = file
                 ordered_files.append(file)
 
-        pending_files: list[PatcherFile] = []
-        for file in ordered_files:
-            if file.link:
-                continue
-            output = self.manifest.file_output(file)
-            if not self.manifest.is_complete_file(file, output):
-                self.manifest.preallocate_file(file)
-                pending_files.append(file)
+        # 语义为“给什么下什么”：是否跳过由上层（如 update 编排器）决定。
+        pending_files = [file for file in ordered_files if not file.link]
+        for file in pending_files:
+            self.manifest.preallocate_file(file)
 
         if not pending_files:
             return self._build_results(files)
 
         jobs = self.build_bundle_jobs(pending_files)
         if not jobs:
+            self._finalize_staging(pending_files, set())
             return self._build_results(files)
 
+        errors = await self._run_jobs(
+            jobs,
+            concurrency_limit=concurrency_limit,
+            progress_callback=progress_callback,
+            progress_interval_seconds=progress_interval_seconds,
+        )
+
+        # 无论批次成败都先收尾 staging：成功文件提交、失败文件丢弃并保留旧文件。
+        failed_bundle_ids = {failure.bundle_id for failure in errors}
+        failed_paths = {
+            file.name
+            for file in pending_files
+            if any(chunk.bundle.bundle_id in failed_bundle_ids for chunk in file.chunks)
+        }
+        await asyncio.to_thread(self._finalize_staging, pending_files, failed_paths)
+
+        if errors:
+            if raise_on_error:
+                raise DownloadBatchError(errors)
+            for failure in errors:
+                logger.error(f"bundle下载失败: {failure.bundle_id:016X}, error={failure.error}")
+            return self._build_results(files, failed_bundle_ids=failed_bundle_ids)
+
+        return self._build_results(files)
+
+    async def download_chunk_entries(
+        self,
+        entries: list[ChunkEntry],
+        *,
+        concurrency_limit: int | None = None,
+        raise_on_error: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        progress_interval_seconds: float | None = 1.0,
+        manage_staging: bool = False,
+    ) -> set[str]:
+        """按预构建 chunk 条目下载并写入各文件的 staging.
+
+        Args:
+            entries: 待下载的 (文件, chunk, 偏移) 条目，通常来自本地验证的 miss 列表。
+            concurrency_limit: 并发 worker 数；不传时使用 manifest 默认值。
+            raise_on_error: 是否在任意 bundle 失败时抛出批量异常。
+            progress_callback: 可选下载进度回调。
+            progress_interval_seconds: 时间周期上报间隔（秒）。
+            manage_staging: True 时由本方法负责 staging 的预分配与提交/丢弃；
+                False（默认）时 staging 生命周期完全归调用方（如 update 编排器）。
+
+        Returns:
+            关联作业失败的文件相对路径集合。
+
+        Raises:
+            DownloadBatchError: 当 `raise_on_error=True` 且存在作业失败时抛出。
+        """
+        entries = list(entries)
+        if not entries:
+            return set()
+
+        involved_files: dict[str, PatcherFile] = {}
+        for entry in entries:
+            involved_files.setdefault(entry.file.name, entry.file)
+
+        if manage_staging:
+            for file in involved_files.values():
+                self.manifest.preallocate_file(file)
+
+        jobs = self.build_bundle_jobs([], entries=entries)
+        errors = await self._run_jobs(
+            jobs,
+            concurrency_limit=concurrency_limit,
+            progress_callback=progress_callback,
+            progress_interval_seconds=progress_interval_seconds,
+        )
+
+        failed_bundle_ids = {failure.bundle_id for failure in errors}
+        failed_paths = {entry.file.name for entry in entries if entry.chunk.bundle.bundle_id in failed_bundle_ids}
+
+        if manage_staging:
+            await asyncio.to_thread(self._finalize_staging, list(involved_files.values()), failed_paths)
+
+        if errors and raise_on_error:
+            raise DownloadBatchError(errors)
+        return failed_paths
+
+    async def _run_jobs(
+        self,
+        jobs: list[BundleJob],
+        *,
+        concurrency_limit: int | None,
+        progress_callback: ProgressCallback | None,
+        progress_interval_seconds: float | None,
+    ) -> list[BundleJobFailure]:
+        """执行 bundle 作业集并返回失败列表（含 worker 池与进度上报）."""
         total_jobs = len(jobs)
         total_bytes = sum(self.job_total_bytes(job) for job in jobs)
         start_time = time.perf_counter()
@@ -649,14 +779,9 @@ class DownloadScheduler:
 
         if errors:
             await self.emit_progress(progress_callback, make_progress("failed"))
-            if raise_on_error:
-                raise DownloadBatchError(errors)
-            for failure in errors:
-                logger.error(f"bundle下载失败: {failure.bundle_id:016X}, error={failure.error}")
-            return self._build_results(files, failed_bundle_ids={failure.bundle_id for failure in errors})
-
-        await self.emit_progress(progress_callback, make_progress("completed"))
-        return self._build_results(files)
+        else:
+            await self.emit_progress(progress_callback, make_progress("completed"))
+        return errors
 
 
 if TYPE_CHECKING:
