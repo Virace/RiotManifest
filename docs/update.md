@@ -127,3 +127,9 @@ if __name__ == "__main__":
   语义变为"给什么下什么"；跳过决策统一由 `ManifestUpdater` 承担。
   需要增量语义时请改用 `updater.sync()`。
 - 下载写盘改为 staging + 原子替换：中断不再损坏已有文件。
+
+## 致谢
+
+本模块的验证与同步语义（chunk 级固定位置验证、hash_type 穷举猜测、
+`--update` / `--no-write` 等模式对应关系）参考了
+[moonshadow565/rman](https://github.com/moonshadow565/rman) 的实现。

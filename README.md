@@ -200,6 +200,7 @@ print(str(pair.version))  # 16.5
 ## 感谢
 
 - [@CommunityDragon](https://github.com/CommunityDragon/CDTB), **CDTB**
+- [@moonshadow565](https://github.com/moonshadow565/rman), **rman**：增量更新的验证与同步语义参考了该项目的实现
 
 ## 许可证
 
