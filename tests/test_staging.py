@@ -105,7 +105,7 @@ def test_successful_batch_commits_staging(tmp_path: Path):
     manifest = _make_manifest(tmp_path)
     file = _make_file(manifest, name="a.bin", bundle_id=0x1001, chunk_id=0x2001)
     output = tmp_path / "a.bin"
-    # 旧内容与目标大小相同：旧版按大小跳过会导致内容不被更新，此处必须被替换。
+    # 旧内容与目标大小相同：大小相等不代表内容一致，提交后必须被新内容替换。
     output.write_bytes(b"aaaa")
 
     async def fake_run_job(self, session, job, file_pool):
