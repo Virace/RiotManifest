@@ -8,6 +8,19 @@
 uv sync
 ```
 
+## 下载 + 增量更新真实冒烟（固定清单版本）
+
+脚本：`scripts/e2e_update_real.py`（不进入 pytest 收集范围，需单独执行）
+
+```bash
+uv run python scripts/e2e_update_real.py
+```
+
+固定使用 16.3.7457600 与 16.4.7480682 两个 lol-game-client 清单
+（链接索引来源 `Morilli/riot-manifests`），覆盖：全量下载 → 人为损坏后
+`REPAIR` 修复 → 跨版本增量更新（含 HKDF→BLAKE3 哈希迁移边界），
+每步以 chunk 级哈希验证收尾。建议在发版前手动执行一次。
+
 ## Manifest 下载压力测试
 
 ```bash

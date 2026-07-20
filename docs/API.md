@@ -12,11 +12,13 @@
    - Manifest 下载主线
 3. `docs/extractor.md`
    - WAD 按需提取
-4. `docs/diff.md`
+4. `docs/update.md`
+   - 增量更新：验证复用、补洞下载与本地状态
+5. `docs/diff.md`
    - Manifest / WAD 差异分析与 BIN 路径回填
-5. `docs/game.md`
+6. `docs/game.md`
    - `LeagueManifestResolver`、`LeagueManifestInspector`、区域语义、版本对象与兼容层
-6. `docs/TESTING.md`
+7. `docs/TESTING.md`
    - 测试、验证方式与基准说明
 
 ## 按任务选文档
@@ -32,6 +34,10 @@
 ### 我只想从 WAD 中提取少量资源
 
 - 看 `docs/extractor.md`
+
+### 我想只下载有变化的内容（增量更新 / 修复本地文件）
+
+- 看 `docs/update.md`
 
 ### 我想比较两个版本的差异
 
@@ -60,6 +66,15 @@
 - `DownloadError`
 - `DownloadBatchError`
 - `DecompressError`
+
+### 增量更新
+
+- `ManifestUpdater`
+- `SyncMode`
+- `UpdateResult`
+- `FileAction`
+- `ManifestArchive`
+- `InstalledState`
 
 ### WAD 提取
 

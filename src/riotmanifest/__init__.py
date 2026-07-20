@@ -43,6 +43,14 @@ from riotmanifest.game import (
     VersionMatchMode,
 )
 from riotmanifest.manifest import PatcherBundle, PatcherChunk, PatcherFile, PatcherManifest
+from riotmanifest.update import (
+    FileAction,
+    InstalledState,
+    ManifestArchive,
+    ManifestUpdater,
+    SyncMode,
+    UpdateResult,
+)
 from riotmanifest.utils.http_client import HttpClientError
 
 logger.disable("riotmanifest")
@@ -91,4 +99,10 @@ __all__ = [
     "diff_manifests",
     "diff_wad_headers",
     "resolve_wad_diff_paths",
+    "ManifestUpdater",
+    "SyncMode",
+    "UpdateResult",
+    "FileAction",
+    "ManifestArchive",
+    "InstalledState",
 ]
