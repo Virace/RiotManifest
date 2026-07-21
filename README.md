@@ -68,6 +68,7 @@ print(result.downloaded_bytes, result.reused_bytes)
 
 - 本地已有数据逐 chunk 验证复用，只下载变化部分
 - 首次运行自动退化为全量；成功后清单自动存档，下次即增量
+- 多清单（如 LCU + GAME）联合同步用 `sync_many`：单 worker 池、跨清单合计的单一进度流
 - 详见 [docs/update.md](docs/update.md)
 
 ### 3. 从 WAD 中按需提取少量文件

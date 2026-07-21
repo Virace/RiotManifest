@@ -70,6 +70,8 @@
 ### 增量更新
 
 - `ManifestUpdater`
+- `SyncTarget`
+- `sync_many`
 - `SyncMode`
 - `UpdateResult`
 - `FileAction`

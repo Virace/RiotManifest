@@ -140,6 +140,31 @@ def test_verify_unknown_hash_type_mismatch_is_miss(tmp_path: Path):
     assert len(result.misses) == 1
 
 
+def test_progress_hook_reports_each_chunk(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    file = _make_file(manifest, "a.bin", [b"aaaa", b"bbbbbb"])
+    local = tmp_path / "a.bin"
+    # 第二个 chunk 损坏：无论命中与否都应上报进度。
+    local.write_bytes(b"aaaa" + b"XXXXXX")
+
+    calls: list[int] = []
+    result = verify_file_chunks(file, local, progress_hook=calls.append)
+
+    assert calls == [4, 6]
+    assert len(result.hits) == 1
+
+
+def test_progress_hook_skipped_for_missing_file(tmp_path: Path):
+    manifest = _make_manifest(tmp_path)
+    file = _make_file(manifest, "a.bin", [b"aaaa"])
+
+    calls: list[int] = []
+    result = verify_file_chunks(file, tmp_path / "a.bin", progress_hook=calls.append)
+
+    assert calls == []
+    assert not result.exists
+
+
 def test_verify_duplicate_chunk_judged_per_position(tmp_path: Path):
     manifest = _make_manifest(tmp_path)
     file = _make_file(manifest, "a.bin", [b"aaaa", b"aaaa"])

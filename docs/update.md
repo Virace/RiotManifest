@@ -5,6 +5,7 @@
 本文件说明增量更新主线：
 
 - `ManifestUpdater`
+- `SyncTarget` / `sync_many`
 - `SyncMode`
 - `UpdateResult`
 - `FileAction`
@@ -57,6 +58,10 @@ if __name__ == "__main__":
 - `manifest`：目标（新）清单，其 `path` 即输出目录。
 - `old_manifest`：旧清单，支持路径 / URL / `PatcherManifest` 实例。
   不传时自动从输出目录的 `installed.json` 存档解析。
+- `archive`（keyword-only，默认 `True`）：是否在输出目录维护 `.rman/` 存档
+  与 installed.json。`False` 时不创建存档、不推进版本指针，旧清单只认显式
+  传入——适合输出目录不归本库管辖的场景（如玩家的游戏目录，重装游戏时
+  会被清空，使用侧自有增量基底时存档只是陌生残留）。
 
 ### `sync()`
 
@@ -69,6 +74,58 @@ if __name__ == "__main__":
 返回 `UpdateResult`。部分文件失败不抛异常：失败文件记入 `failed`，
 失败原因（bundle_id + 原始异常）记入 `failures`，
 其旧文件保持原样，且本次不更新 `installed.json`（版本指针只在整批成功后推进）。
+
+## 多清单联合同步 `sync_many`
+
+同时同步多个清单（如 LCU + GAME）时，用 `sync_many` 合并下载调度：
+单 worker 池、单一进度事件流，`DownloadProgress` 的 total/finished 为
+跨清单合计——按字节加权的全局进度天然准确，无需使用侧自行聚合。
+
+```python
+from riotmanifest import SyncTarget, sync_many
+
+results = await sync_many(
+    [
+        SyncTarget(manifest=manifest_lcu, files=files_lcu),
+        SyncTarget(manifest=manifest_game, files=files_game, archive=False),
+    ],
+    concurrency_limit=16,           # 全局并发，缺省取各清单上限的最大值
+    progress_callback=on_progress,  # 单一进度流，total 跨清单合计
+)
+```
+
+返回与入参顺序一致的 `UpdateResult` 列表；部分失败不抛异常，
+失败只影响所属清单的结果与存档推进。各清单保留自己的输出根与
+`.rman` 存档语义（`archive` / `old_manifest` 可按清单指定）。
+`mode` / `remove_deleted` 等其余参数语义与 `sync()` 相同，作用于全部目标。
+
+## 进度事件生命周期
+
+`progress_callback` 收到的 `DownloadProgress` 覆盖完整 sync 生命周期，
+按 `phase` 区分阶段。各阶段 total/finished 口径不同（阶段内部自洽）：
+
+| 层 | phase | 含义 | total/finished 口径 |
+|---|---|---|---|
+| 编排层 | `verify` | 本地逐 chunk 校验进行中（周期）与结束快照 | jobs=待验证文件数；bytes=解压域 |
+| 编排层 | `plan_ready` | 计划确定，下载总量已知（哪怕为 0） | jobs=bundle 作业数；bytes=压缩域 |
+| 调度层 | `start` / `tick` / `bundle_completed` / `bundle_failed` / `completed` / `failed` | 下载批次 | jobs=bundle 作业数；bytes=压缩域 |
+| 编排层 | `finalize` | staging 提交 / 清理开始 | 同 plan_ready，finished=total |
+| 编排层 | `sync_completed` / `sync_failed` | 全程终态（事件流最后一条） | 同 plan_ready，finished=total |
+
+要点：
+
+- 事件序列：`verify` → `plan_ready` → 下载阶段事件 → `finalize` →
+  `sync_completed` / `sync_failed`。
+- `plan_ready` 与下载阶段完全同口径（压缩域字节 / bundle 作业数），
+  可直接用它渲染进度条分母；无任何需要下载的内容时也会发出（总量为 0），
+  使用侧可区分"还没开始"与"没有要下的"。
+- `verify` 阶段按已校验字节数报进度（REPAIR 全量校验不再静默）；
+  周期间隔沿用 `progress_interval_seconds`，结束时必发一次
+  `finished == total` 的快照。FORCE_FULL 跳过验证，无 `verify` 事件。
+- VERIFY_ONLY 序列为 `verify` → `plan_ready`（报"需要下载多少"）→
+  `sync_completed`，无下载与 `finalize`。
+- `finalize` / 终态是里程碑事件：失败细节以下载阶段事件与
+  `UpdateResult`（`failed` / `failures`）为准。
 
 ## `SyncMode`
 
@@ -123,6 +180,26 @@ if __name__ == "__main__":
   中断或失败时旧文件保持完整。峰值磁盘占用约多出"单个在写文件"的大小。
 - `installed.json` 的 schema 与 Go 项目 RiotManifestGo 共享，
   两个工具指向同一个游戏目录时状态可互认。
+
+## 输出根语义（多清单场景必读）
+
+清单内文件路径相对 Riot 原生安装根（LCU 与 `Game\` 同级）。
+**输出根 = 该清单对应产品的安装根**：不同清单不可共用同一输出根。
+例如腾讯服将 LCU 挪进 `LeagueClient\` 子目录，因此 LCU 清单必须以
+`<游戏根>\LeagueClient` 为输出根同步，GAME 清单以游戏根为输出根；
+共用同一输出根会把 LCU 文件写进游戏根（凭空多出 `Plugins\` 等目录）。
+
+## 下载日志
+
+正常运行 INFO 只有批次级摘要；DEBUG 级别每个 bundle 作业成功会输出
+`bundle_id、bytes、elapsed、speed、retries`，例如：
+
+```
+bundle作业完成: 00000000075BCA5C, bytes=4194304, elapsed=1.20s, speed=3495253B/s, retries=0
+```
+
+使用侧可用日志路由（如 loguru 按 `record["name"].startswith("riotmanifest")`
+过滤）把 DEBUG 传输记录收进独立下载日志文件，用于慢速 / 波动问题的事后分析。
 
 ## 与 diff 模块的关系
 

@@ -49,7 +49,9 @@ from riotmanifest.update import (
     ManifestArchive,
     ManifestUpdater,
     SyncMode,
+    SyncTarget,
     UpdateResult,
+    sync_many,
 )
 from riotmanifest.utils.http_client import HttpClientError
 
@@ -103,6 +105,8 @@ __all__ = [
     "resolve_wad_diff_paths",
     "ManifestUpdater",
     "SyncMode",
+    "SyncTarget",
+    "sync_many",
     "UpdateResult",
     "FileAction",
     "ManifestArchive",
