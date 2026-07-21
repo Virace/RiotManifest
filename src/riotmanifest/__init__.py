@@ -3,7 +3,7 @@
 from loguru import logger
 
 from riotmanifest.core.binary_parser import BinaryParser
-from riotmanifest.core.errors import DecompressError, DownloadBatchError, DownloadError
+from riotmanifest.core.errors import BundleJobFailure, DecompressError, DownloadBatchError, DownloadError
 from riotmanifest.diff import (
     ManifestBinPathProvider,
     ManifestDiffEntry,
@@ -20,7 +20,7 @@ from riotmanifest.diff import (
     diff_wad_headers,
     resolve_wad_diff_paths,
 )
-from riotmanifest.downloader import DownloadProgress
+from riotmanifest.downloader import ChunkDownloadResult, DownloadProgress
 from riotmanifest.extractor import WADExtractor
 from riotmanifest.game import (
     ConsistentGameManifestNotFoundError,
@@ -58,7 +58,9 @@ logger.disable("riotmanifest")
 __all__ = [
     "DownloadError",
     "DownloadBatchError",
+    "BundleJobFailure",
     "DecompressError",
+    "ChunkDownloadResult",
     "BinaryParser",
     "PatcherChunk",
     "PatcherBundle",

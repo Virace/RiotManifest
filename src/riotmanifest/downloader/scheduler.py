@@ -45,6 +45,20 @@ class DownloadProgress:
 ProgressCallback = Callable[[DownloadProgress], Awaitable[None] | None]
 
 
+@dataclass(slots=True)
+class ChunkDownloadResult:
+    """按 chunk 条目下载的结构化结果.
+
+    Attributes:
+        failed_paths: 关联失败作业的文件相对路径集合；空集合表示全部成功。
+        failures: bundle 维度的失败详情。`error` 为重试耗尽后的包装异常，
+            底层原因（超时 / 连接重置 / HTTP 状态码等）沿 `__cause__` 链保留。
+    """
+
+    failed_paths: set[str]
+    failures: list[BundleJobFailure]
+
+
 @dataclass
 class WriteTarget:
     """单个 chunk 的文件写入目标."""
@@ -321,6 +335,14 @@ class DownloadScheduler:
                 fallback_parts.append(payload)
 
         # 兼容部分 CDN 返回缺失或无序 Content-Range 头的情况，按剩余顺序兜底映射。
+        unmapped = sum(1 for value in mapped_parts if value is None)
+        if unmapped:
+            logger.debug(
+                "multipart缺失Content-Range，按顺序兜底映射: bundle_id={:016X}, parts={}/{}",
+                bundle_id,
+                unmapped,
+                len(ranges),
+            )
         for idx, value in enumerate(mapped_parts):
             if value is None:
                 if not fallback_parts:
@@ -366,6 +388,11 @@ class DownloadScheduler:
                     raise DownloadError(f"HTTP状态异常: {response.status}, bundle_id={bundle_id}")
 
                 if response.status == 200:
+                    logger.debug(
+                        "range请求降级为200完整体，本地切片: bundle_id={:016X}, ranges={}",
+                        bundle_id,
+                        len(ranges),
+                    )
                     payload = await response.read()
                     range_payloads = self.extract_ranges_from_full_body(
                         payload,
@@ -481,11 +508,20 @@ class DownloadScheduler:
                 last_error = exc
                 if attempt == self.manifest.max_retries - 1:
                     break
-                await asyncio.sleep(attempt + 1)
+                delay = attempt + 1
+                logger.warning(
+                    "bundle作业重试: {:016X}, attempt={}/{}, delay={}s, error={}",
+                    job.bundle_id,
+                    attempt + 1,
+                    self.manifest.max_retries,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
 
         raise DownloadError(
             f"bundle任务失败: bundle_id={job.bundle_id}, retries={self.manifest.max_retries}, error={last_error}"
-        )
+        ) from last_error
 
     def _finalize_staging(
         self,
@@ -595,8 +631,6 @@ class DownloadScheduler:
         if errors:
             if raise_on_error:
                 raise DownloadBatchError(errors)
-            for failure in errors:
-                logger.error(f"bundle下载失败: {failure.bundle_id:016X}, error={failure.error}")
             return self._build_results(files, failed_bundle_ids=failed_bundle_ids)
 
         return self._build_results(files)
@@ -610,7 +644,7 @@ class DownloadScheduler:
         progress_callback: ProgressCallback | None = None,
         progress_interval_seconds: float | None = 1.0,
         manage_staging: bool = False,
-    ) -> set[str]:
+    ) -> ChunkDownloadResult:
         """按预构建 chunk 条目下载并写入各文件的 staging.
 
         Args:
@@ -623,14 +657,15 @@ class DownloadScheduler:
                 False（默认）时 staging 生命周期完全归调用方（如 update 编排器）。
 
         Returns:
-            关联作业失败的文件相对路径集合。
+            失败文件路径集合与 bundle 维度失败详情；`raise_on_error=False` 时
+            下游依赖 `failures` 获取每个失败的原始异常。
 
         Raises:
             DownloadBatchError: 当 `raise_on_error=True` 且存在作业失败时抛出。
         """
         entries = list(entries)
         if not entries:
-            return set()
+            return ChunkDownloadResult(failed_paths=set(), failures=[])
 
         involved_files: dict[str, PatcherFile] = {}
         for entry in entries:
@@ -656,7 +691,7 @@ class DownloadScheduler:
 
         if errors and raise_on_error:
             raise DownloadBatchError(errors)
-        return failed_paths
+        return ChunkDownloadResult(failed_paths=failed_paths, failures=errors)
 
     async def _run_jobs(
         self,
@@ -699,6 +734,7 @@ class DownloadScheduler:
             concurrency_limit if concurrency_limit is not None else self.manifest.concurrency_limit
         )
         worker_count = max(1, min(effective_concurrency, len(jobs)))
+        logger.info("下载批次开始: jobs={}, total_bytes={}, workers={}", total_jobs, total_bytes, worker_count)
         connector = aiohttp.TCPConnector(
             limit=max(worker_count * 4, 16),
             limit_per_host=max(worker_count * 4, 16),
@@ -733,6 +769,7 @@ class DownloadScheduler:
                         file_pool=file_pool,
                     )
                     job_bytes = self.job_total_bytes(job)
+                    logger.debug("bundle作业完成: {:016X}, bytes={}", job.bundle_id, job_bytes)
                     async with progress_lock:
                         succeeded_jobs += 1
                         finished_jobs += 1
@@ -740,6 +777,7 @@ class DownloadScheduler:
                         progress = make_progress("bundle_completed", bundle_id=job.bundle_id)
                     await self.emit_progress(progress_callback, progress)
                 except Exception as exc:  # noqa: BLE001
+                    logger.error("bundle下载失败: {:016X}, error={}", job.bundle_id, exc)
                     async with error_lock:
                         errors.append(BundleJobFailure(bundle_id=job.bundle_id, error=exc))
                     async with progress_lock:
@@ -777,6 +815,13 @@ class DownloadScheduler:
                 await reporter_task
             await asyncio.to_thread(file_pool.close)
 
+        logger.info(
+            "下载批次结束: succeeded={}, failed={}, finished_bytes={}, elapsed={:.1f}s",
+            succeeded_jobs,
+            failed_jobs,
+            finished_bytes,
+            max(time.perf_counter() - start_time, 0.0),
+        )
         if errors:
             await self.emit_progress(progress_callback, make_progress("failed"))
         else:

@@ -67,6 +67,7 @@ if __name__ == "__main__":
 - `concurrency_limit` / `progress_callback` / `progress_interval_seconds`：透传给下载调度器。
 
 返回 `UpdateResult`。部分文件失败不抛异常：失败文件记入 `failed`，
+失败原因（bundle_id + 原始异常）记入 `failures`，
 其旧文件保持原样，且本次不更新 `installed.json`（版本指针只在整批成功后推进）。
 
 ## `SyncMode`
@@ -98,6 +99,15 @@ if __name__ == "__main__":
 - `missing_bytes`：未满足的缺口（`VERIFY_ONLY` 的缺失量，或失败文件的缺口）。
 - `removed`：实际删除的路径列表。
 - `failed`：下载失败的文件列表。
+- `failures`：bundle 维度的失败详情（`BundleJobFailure` 列表）。
+  `error` 为重试耗尽后的包装异常，底层原因（超时 / 连接重置 / HTTP 状态码等）
+  沿 `error.__cause__` 链保留：
+
+  ```python
+  for failure in result.failures:
+      print(f"bundle {failure.bundle_id:016X}: {failure.error}")
+      print(f"  底层原因: {failure.error.__cause__!r}")
+  ```
 
 ## 本地状态与磁盘布局
 

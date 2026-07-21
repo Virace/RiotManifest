@@ -262,6 +262,43 @@ def on_progress(progress: DownloadProgress) -> None:
 
 - 并发批量下载时，一个或多个 bundle job 失败
 
+`failures` 属性为 `BundleJobFailure` 列表（`bundle_id` + `error`）。
+`error` 为重试耗尽后的包装异常，底层原因（超时 / 连接重置 / HTTP 状态码等）
+沿 `error.__cause__` 链保留：
+
+```python
+try:
+    await manifest.download_files_concurrently(files)
+except DownloadBatchError as exc:
+    for failure in exc.failures:
+        print(f"bundle {failure.bundle_id:016X}: {failure.error}")
+        print(f"  底层原因: {failure.error.__cause__!r}")
+```
+
+## 日志
+
+库内日志基于 loguru，导入时默认整体关闭（`logger.disable("riotmanifest")`），
+不开启就不会有任何输出，也不会干扰下游应用自己的日志。需要诊断时显式开启：
+
+```python
+from loguru import logger
+
+logger.enable("riotmanifest")
+```
+
+各级别的定位与量级（以一次批量下载为基准）：
+
+| 级别 | 定位 | 量级 |
+|---|---|---|
+| ERROR | 重试耗尽后的最终失败，结果已受损 | O(失败 bundle 数)，正常为 0 |
+| WARNING | 已触发自动重试的单次尝试失败 | 正常为 0，网络抖动时 O(重试次数) |
+| INFO | 批次级里程碑（开始 / 结束摘要） | 每批固定 2 条 |
+| DEBUG | 作业级细节与降级路径（逐 bundle 完成、200 完整体回退、multipart 兜底映射） | O(bundle 作业数) |
+
+失败原因的结构化获取不依赖日志：批量下载捕获 `DownloadBatchError.failures`，
+增量更新读 `UpdateResult.failures`，
+直接调 `download_chunk_entries` 读返回值的 `failures`。
+
 ## 推荐调用路径
 
 最常用的下载路径通常是：

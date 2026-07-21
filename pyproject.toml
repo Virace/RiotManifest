@@ -1,6 +1,6 @@
 [project]
 name = "riotmanifest"
-version = "2.5.0"
+version = "2.6.0"
 description = "Riot manifest parsing, concurrent downloader, and manifest/WAD diff toolkit."
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
@@ -11,7 +11,7 @@ dependencies = [
     "aiohttp>=3.14.1",
     "urllib3>=2.7.0",
     "blake3>=1.0.9",
-    "league-tools>=1.1.5",
+    "league-tools>=1.2.0",
 ]
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -38,6 +38,9 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 managed = true
+# zstd 1.5.7.3 已被 PyPI 撤回（yanked: buggy - not thread safe），
+# 经 league-tools 传递引入，锁定在上一个可用版本。
+constraint-dependencies = ["zstd==1.5.7.2"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

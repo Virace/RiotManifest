@@ -100,9 +100,10 @@ def test_download_chunk_entries_without_staging_management(tmp_path: Path):
         manifest.downloader,
     )
 
-    failed = asyncio.run(manifest.downloader.download_chunk_entries(list(iter_chunk_entries(file))))
+    result = asyncio.run(manifest.downloader.download_chunk_entries(list(iter_chunk_entries(file))))
 
-    assert failed == set()
+    assert result.failed_paths == set()
+    assert result.failures == []
     # 未托管 staging：不提交，目标文件不存在，staging 保留写入内容。
     assert not output.exists()
     assert Path(staging_path(output)).read_bytes() == b"newx"
@@ -118,14 +119,14 @@ def test_download_chunk_entries_manage_staging_commits(tmp_path: Path):
         manifest.downloader,
     )
 
-    failed = asyncio.run(
+    result = asyncio.run(
         manifest.downloader.download_chunk_entries(
             list(iter_chunk_entries(file)),
             manage_staging=True,
         )
     )
 
-    assert failed == set()
+    assert result.failed_paths == set()
     assert output.read_bytes() == b"newx"
     assert not os.path.exists(staging_path(output))
 
@@ -145,7 +146,7 @@ def test_download_chunk_entries_reports_failed_paths(tmp_path: Path):
     manifest.downloader.run_bundle_job_with_retry = types.MethodType(fake_run_job, manifest.downloader)
 
     entries = list(iter_chunk_entries(ok_file)) + list(iter_chunk_entries(bad_file))
-    failed = asyncio.run(
+    result = asyncio.run(
         manifest.downloader.download_chunk_entries(
             entries,
             manage_staging=True,
@@ -153,7 +154,11 @@ def test_download_chunk_entries_reports_failed_paths(tmp_path: Path):
         )
     )
 
-    assert failed == {"bad.bin"}
+    assert result.failed_paths == {"bad.bin"}
+    # 失败详情携带 bundle_id 与原始异常，供下游诊断。
+    assert len(result.failures) == 1
+    assert result.failures[0].bundle_id == 0x2002
+    assert "mock failure" in str(result.failures[0].error)
     assert (tmp_path / "ok.bin").read_bytes() == b"newx"
     # 失败文件：staging 丢弃、目标不落盘。
     assert not (tmp_path / "bad.bin").exists()

@@ -3,6 +3,7 @@
 from riotmanifest.downloader.file_pool import FileHandlePool
 from riotmanifest.downloader.scheduler import (
     BundleJob,
+    ChunkDownloadResult,
     ChunkEntry,
     ChunkRange,
     DownloadProgress,
@@ -23,6 +24,7 @@ __all__ = [
     "FileHandlePool",
     "WriteTarget",
     "GlobalChunkTask",
+    "ChunkDownloadResult",
     "ChunkEntry",
     "iter_chunk_entries",
     "ChunkRange",
