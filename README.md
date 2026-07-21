@@ -157,6 +157,13 @@ print(str(pair.version))  # 16.5
 - 网络或磁盘较弱时可降到 `8~12`。
 - 机器配置较好且网络稳定时，可尝试 `16~24`。
 
+### 日志
+
+- 库内日志默认整体关闭，不会干扰下游输出。
+- 排查网络问题时可开启：`from loguru import logger; logger.enable("riotmanifest")`，
+  级别语义与量级见 [docs/manifest.md](docs/manifest.md)。
+- 失败原因的结构化获取不依赖日志：`DownloadBatchError.failures` / `UpdateResult.failures`。
+
 ### WAD 提取
 
 - `WADExtractor` 适合“少量小文件按需提取”。

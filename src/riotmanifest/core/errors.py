@@ -17,7 +17,11 @@ class DecompressError(Exception):
 
 @dataclass
 class BundleJobFailure:
-    """单个 bundle 任务失败信息."""
+    """单个 bundle 任务失败信息.
+
+    `error` 为重试耗尽后的包装异常，底层原因
+    （超时 / 连接重置 / HTTP 状态码等）沿 `error.__cause__` 链保留。
+    """
 
     bundle_id: int
     error: Exception

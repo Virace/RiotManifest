@@ -122,6 +122,7 @@ def test_incremental_sync_downloads_only_missing_chunks(tmp_path: Path):
     assert result.removed == ["gone.bin"]
     assert not (tmp_path / "gone.bin").exists()
     assert result.failed == []
+    assert result.failures == []
 
 
 def test_moved_file_copied_without_download(tmp_path: Path):
@@ -212,6 +213,10 @@ def test_partial_failure_keeps_old_file_and_state(tmp_path: Path):
     result = asyncio.run(updater.sync())
 
     assert result.failed == ["bad.bin"]
+    # 失败详情透传到 UpdateResult，下游可拿到 bundle_id 与原始异常。
+    assert len(result.failures) == 1
+    assert result.failures[0].bundle_id == 0x2002
+    assert "mock bundle failure" in str(result.failures[0].error)
     assert (tmp_path / "ok.bin").read_bytes() == d1
     # 失败文件旧内容保留、无 staging 残留。
     assert (tmp_path / "bad.bin").read_bytes() == b"old!"

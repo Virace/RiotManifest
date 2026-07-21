@@ -26,6 +26,7 @@ from riotmanifest.update.state import ManifestArchive
 from riotmanifest.update.verify import verify_file_chunks
 
 if TYPE_CHECKING:
+    from riotmanifest.core.errors import BundleJobFailure
     from riotmanifest.downloader.scheduler import ProgressCallback
     from riotmanifest.manifest import PatcherFile
 
@@ -159,8 +160,9 @@ class ManifestUpdater:
             )
 
         failed_paths: set[str] = set()
+        failures: list[BundleJobFailure] = []
         if misses:
-            failed_paths = await manifest.downloader.download_chunk_entries(
+            download = await manifest.downloader.download_chunk_entries(
                 misses,
                 concurrency_limit=concurrency_limit,
                 raise_on_error=False,
@@ -168,6 +170,8 @@ class ManifestUpdater:
                 progress_interval_seconds=progress_interval_seconds,
                 manage_staging=False,
             )
+            failed_paths = download.failed_paths
+            failures = download.failures
             downloaded_bytes = sum(miss.chunk.target_size for miss in misses if miss.file.name not in failed_paths)
             missing_bytes = sum(miss.chunk.target_size for miss in misses if miss.file.name in failed_paths)
 
@@ -214,5 +218,6 @@ class ManifestUpdater:
             missing_bytes=missing_bytes,
             removed=removed,
             failed=sorted(failed_paths),
+            failures=failures,
             verify_only=False,
         )

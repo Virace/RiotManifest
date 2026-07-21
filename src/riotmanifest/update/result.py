@@ -7,6 +7,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from riotmanifest.core.errors import BundleJobFailure
     from riotmanifest.update.planner import FileAction
 
 
@@ -39,6 +40,8 @@ class UpdateResult:
         missing_bytes: 未满足的解压域字节数（VERIFY_ONLY 的缺失量，或下载失败文件的缺口）。
         removed: 实际删除的 REMOVE 路径列表。
         failed: 下载失败的文件路径列表（其旧文件保持原样）。
+        failures: bundle 维度的下载失败详情（文件视角见 `failed`）。
+            `error` 为重试耗尽后的包装异常，底层原因沿 `__cause__` 链保留。
         verify_only: 本次是否为 VERIFY_ONLY 运行。
     """
 
@@ -48,4 +51,5 @@ class UpdateResult:
     missing_bytes: int = 0
     removed: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
+    failures: list[BundleJobFailure] = field(default_factory=list)
     verify_only: bool = False
