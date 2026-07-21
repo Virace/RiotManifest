@@ -1,5 +1,6 @@
 """增量更新（update）子模块导出."""
 
+from riotmanifest.update.multi import SyncTarget, sync_many
 from riotmanifest.update.planner import FileAction, PlanEntry, UpdatePlan, build_update_plan
 from riotmanifest.update.result import SyncMode, UpdateResult
 from riotmanifest.update.state import InstalledState, ManifestArchive
@@ -25,4 +26,6 @@ __all__ = [
     "SyncMode",
     "UpdateResult",
     "ManifestUpdater",
+    "SyncTarget",
+    "sync_many",
 ]

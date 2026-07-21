@@ -493,8 +493,12 @@ class DownloadScheduler:
         session: aiohttp.ClientSession,
         job: BundleJob,
         file_pool: FileHandlePool,
-    ) -> None:
-        """执行 bundle 作业并按配置重试失败任务."""
+    ) -> int:
+        """执行 bundle 作业并按配置重试失败任务.
+
+        Returns:
+            成功前经历的重试次数；0 表示首次尝试即成功。
+        """
         last_error: Exception | None = None
         for attempt in range(self.manifest.max_retries):
             try:
@@ -503,7 +507,7 @@ class DownloadScheduler:
                     job=job,
                     file_pool=file_pool,
                 )
-                return
+                return attempt
             except (DownloadError, DecompressError, OSError) as exc:
                 last_error = exc
                 if attempt == self.manifest.max_retries - 1:
@@ -701,132 +705,189 @@ class DownloadScheduler:
         progress_callback: ProgressCallback | None,
         progress_interval_seconds: float | None,
     ) -> list[BundleJobFailure]:
-        """执行 bundle 作业集并返回失败列表（含 worker 池与进度上报）."""
-        total_jobs = len(jobs)
-        total_bytes = sum(self.job_total_bytes(job) for job in jobs)
-        start_time = time.perf_counter()
-        succeeded_jobs = 0
-        failed_jobs = 0
-        finished_jobs = 0
-        finished_bytes = 0
-        progress_lock = asyncio.Lock()
-
-        def make_progress(phase: str, bundle_id: int | None = None) -> DownloadProgress:
-            """构建当前时刻的下载进度快照."""
-            elapsed_seconds = max(time.perf_counter() - start_time, 0.0)
-            progress_ratio = finished_jobs / total_jobs if total_jobs > 0 else 1.0
-            average_speed = finished_bytes / elapsed_seconds if elapsed_seconds > 0 else 0.0
-            return DownloadProgress(
-                phase=phase,
-                total_jobs=total_jobs,
-                finished_jobs=finished_jobs,
-                succeeded_jobs=succeeded_jobs,
-                failed_jobs=failed_jobs,
-                total_bytes=total_bytes,
-                finished_bytes=finished_bytes,
-                progress=progress_ratio,
-                elapsed_seconds=elapsed_seconds,
-                average_speed_bytes_per_sec=average_speed,
-                bundle_id=bundle_id,
-            )
-
-        effective_concurrency = (
-            concurrency_limit if concurrency_limit is not None else self.manifest.concurrency_limit
+        """执行本清单的 bundle 作业集（多组运行器的单组特例）."""
+        effective = concurrency_limit if concurrency_limit is not None else self.manifest.concurrency_limit
+        grouped = await run_job_groups(
+            [JobGroup(scheduler=self, jobs=jobs)],
+            concurrency_limit=effective,
+            progress_callback=progress_callback,
+            progress_interval_seconds=progress_interval_seconds,
         )
-        worker_count = max(1, min(effective_concurrency, len(jobs)))
-        logger.info("下载批次开始: jobs={}, total_bytes={}, workers={}", total_jobs, total_bytes, worker_count)
-        connector = aiohttp.TCPConnector(
-            limit=max(worker_count * 4, 16),
-            limit_per_host=max(worker_count * 4, 16),
+        return grouped[0]
+
+
+@dataclass(slots=True)
+class JobGroup:
+    """归属同一调度器（同一清单）的一组 bundle 作业."""
+
+    scheduler: DownloadScheduler
+    jobs: list[BundleJob]
+
+
+async def run_job_groups(
+    groups: list[JobGroup],
+    *,
+    concurrency_limit: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    progress_interval_seconds: float | None = 1.0,
+) -> list[list[BundleJobFailure]]:
+    """跨清单合并执行多组 bundle 作业：单 worker 池、单进度流.
+
+    进度事件的 total/finished 为所有组合计（字节为压缩域）；
+    `concurrency_limit` 缺省时取各组清单 `concurrency_limit` 的最大值。
+
+    Returns:
+        与 groups 一一对应的失败列表。
+    """
+    if not groups:
+        return []
+
+    items: list[tuple[int, BundleJob]] = [
+        (group_index, job) for group_index, group in enumerate(groups) for job in group.jobs
+    ]
+    # 先执行大作业可显著降低 worker 队列尾部“少量超大包”导致的长尾。
+    items.sort(key=lambda item: (-DownloadScheduler.job_total_bytes(item[1]), item[1].bundle_id))
+
+    total_jobs = len(items)
+    total_bytes = sum(DownloadScheduler.job_total_bytes(job) for _, job in items)
+    start_time = time.perf_counter()
+    succeeded_jobs = 0
+    failed_jobs = 0
+    finished_jobs = 0
+    finished_bytes = 0
+    progress_lock = asyncio.Lock()
+
+    def make_progress(phase: str, bundle_id: int | None = None) -> DownloadProgress:
+        """构建当前时刻的下载进度快照."""
+        elapsed_seconds = max(time.perf_counter() - start_time, 0.0)
+        progress_ratio = finished_jobs / total_jobs if total_jobs > 0 else 1.0
+        average_speed = finished_bytes / elapsed_seconds if elapsed_seconds > 0 else 0.0
+        return DownloadProgress(
+            phase=phase,
+            total_jobs=total_jobs,
+            finished_jobs=finished_jobs,
+            succeeded_jobs=succeeded_jobs,
+            failed_jobs=failed_jobs,
+            total_bytes=total_bytes,
+            finished_bytes=finished_bytes,
+            progress=progress_ratio,
+            elapsed_seconds=elapsed_seconds,
+            average_speed_bytes_per_sec=average_speed,
+            bundle_id=bundle_id,
         )
-        timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
-        file_pool = FileHandlePool(max_handles=max(worker_count * 8, 256))
 
-        queue: asyncio.Queue[BundleJob] = asyncio.Queue()
-        for job in jobs:
-            queue.put_nowait(job)
+    effective_concurrency = (
+        concurrency_limit
+        if concurrency_limit is not None
+        else max(group.scheduler.manifest.concurrency_limit for group in groups)
+    )
+    worker_count = max(1, min(effective_concurrency, total_jobs))
+    logger.info("下载批次开始: jobs={}, total_bytes={}, workers={}", total_jobs, total_bytes, worker_count)
+    connector = aiohttp.TCPConnector(
+        limit=max(worker_count * 4, 16),
+        limit_per_host=max(worker_count * 4, 16),
+    )
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
+    file_pool = FileHandlePool(max_handles=max(worker_count * 8, 256))
 
-        errors: list[BundleJobFailure] = []
-        error_lock = asyncio.Lock()
-        reporter_stop = asyncio.Event()
-        reporter_task: asyncio.Task[None] | None = None
+    queue: asyncio.Queue[tuple[int, BundleJob]] = asyncio.Queue()
+    for item in items:
+        queue.put_nowait(item)
 
-        interval_enabled = progress_interval_seconds is not None and progress_interval_seconds > 0
-        interval_seconds = progress_interval_seconds if interval_enabled else 0.0
+    failures: list[list[BundleJobFailure]] = [[] for _ in groups]
+    error_lock = asyncio.Lock()
+    reporter_stop = asyncio.Event()
+    reporter_task: asyncio.Task[None] | None = None
 
-        async def worker() -> None:
-            nonlocal failed_jobs, finished_bytes, finished_jobs, succeeded_jobs
-            while True:
-                try:
-                    job = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+    interval_enabled = progress_interval_seconds is not None and progress_interval_seconds > 0
+    interval_seconds = progress_interval_seconds if interval_enabled else 0.0
 
-                try:
-                    await self.run_bundle_job_with_retry(
-                        session=session,
-                        job=job,
-                        file_pool=file_pool,
-                    )
-                    job_bytes = self.job_total_bytes(job)
-                    logger.debug("bundle作业完成: {:016X}, bytes={}", job.bundle_id, job_bytes)
-                    async with progress_lock:
-                        succeeded_jobs += 1
-                        finished_jobs += 1
-                        finished_bytes += job_bytes
-                        progress = make_progress("bundle_completed", bundle_id=job.bundle_id)
-                    await self.emit_progress(progress_callback, progress)
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("bundle下载失败: {:016X}, error={}", job.bundle_id, exc)
-                    async with error_lock:
-                        errors.append(BundleJobFailure(bundle_id=job.bundle_id, error=exc))
-                    async with progress_lock:
-                        failed_jobs += 1
-                        finished_jobs += 1
-                        progress = make_progress("bundle_failed", bundle_id=job.bundle_id)
-                    await self.emit_progress(progress_callback, progress)
-                finally:
-                    queue.task_done()
+    async def worker() -> None:
+        nonlocal failed_jobs, finished_bytes, finished_jobs, succeeded_jobs
+        while True:
+            try:
+                group_index, job = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
-        async def periodic_progress_reporter() -> None:
-            """按固定时间间隔上报进度，避免长尾任务无反馈."""
-            if not interval_enabled:
-                return
-
-            while not reporter_stop.is_set():
-                await asyncio.sleep(interval_seconds)
-                if reporter_stop.is_set():
-                    break
+            scheduler = groups[group_index].scheduler
+            job_started = time.perf_counter()
+            try:
+                retries = await scheduler.run_bundle_job_with_retry(
+                    session=session,
+                    job=job,
+                    file_pool=file_pool,
+                )
+                job_bytes = DownloadScheduler.job_total_bytes(job)
+                job_elapsed = max(time.perf_counter() - job_started, 1e-9)
+                logger.debug(
+                    "bundle作业完成: {:016X}, bytes={}, elapsed={:.2f}s, speed={:.0f}B/s, retries={}",
+                    job.bundle_id,
+                    job_bytes,
+                    job_elapsed,
+                    job_bytes / job_elapsed,
+                    retries,
+                )
                 async with progress_lock:
-                    progress = make_progress("tick")
-                await self.emit_progress(progress_callback, progress)
+                    succeeded_jobs += 1
+                    finished_jobs += 1
+                    finished_bytes += job_bytes
+                    progress = make_progress("bundle_completed", bundle_id=job.bundle_id)
+                await DownloadScheduler.emit_progress(progress_callback, progress)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("bundle下载失败: {:016X}, error={}", job.bundle_id, exc)
+                async with error_lock:
+                    failures[group_index].append(BundleJobFailure(bundle_id=job.bundle_id, error=exc))
+                async with progress_lock:
+                    failed_jobs += 1
+                    finished_jobs += 1
+                    progress = make_progress("bundle_failed", bundle_id=job.bundle_id)
+                await DownloadScheduler.emit_progress(progress_callback, progress)
+            finally:
+                queue.task_done()
 
-        try:
-            await self.emit_progress(progress_callback, make_progress("start"))
-            if progress_callback is not None and interval_enabled:
-                reporter_task = asyncio.create_task(periodic_progress_reporter())
-            async with aiohttp.ClientSession(connector=connector, timeout=timeout, auto_decompress=False) as session:
-                workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
-                await queue.join()
-                await asyncio.gather(*workers)
-        finally:
-            reporter_stop.set()
-            if reporter_task is not None:
-                await reporter_task
-            await asyncio.to_thread(file_pool.close)
+    async def periodic_progress_reporter() -> None:
+        """按固定时间间隔上报进度，避免长尾任务无反馈."""
+        if not interval_enabled:
+            return
 
-        logger.info(
-            "下载批次结束: succeeded={}, failed={}, finished_bytes={}, elapsed={:.1f}s",
-            succeeded_jobs,
-            failed_jobs,
-            finished_bytes,
-            max(time.perf_counter() - start_time, 0.0),
-        )
-        if errors:
-            await self.emit_progress(progress_callback, make_progress("failed"))
-        else:
-            await self.emit_progress(progress_callback, make_progress("completed"))
-        return errors
+        # 等停止事件带超时而非裸 sleep：批次收尾不必等满一个间隔。
+        while not reporter_stop.is_set():
+            try:
+                await asyncio.wait_for(reporter_stop.wait(), timeout=interval_seconds)
+                break
+            except asyncio.TimeoutError:  # noqa: UP041 - 3.10 下两者不同类
+                pass
+            async with progress_lock:
+                progress = make_progress("tick")
+            await DownloadScheduler.emit_progress(progress_callback, progress)
+
+    try:
+        await DownloadScheduler.emit_progress(progress_callback, make_progress("start"))
+        if progress_callback is not None and interval_enabled:
+            reporter_task = asyncio.create_task(periodic_progress_reporter())
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout, auto_decompress=False) as session:
+            workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
+            await queue.join()
+            await asyncio.gather(*workers)
+    finally:
+        reporter_stop.set()
+        if reporter_task is not None:
+            await reporter_task
+        await asyncio.to_thread(file_pool.close)
+
+    logger.info(
+        "下载批次结束: succeeded={}, failed={}, finished_bytes={}, elapsed={:.1f}s",
+        succeeded_jobs,
+        failed_jobs,
+        finished_bytes,
+        max(time.perf_counter() - start_time, 0.0),
+    )
+    if any(failures):
+        await DownloadScheduler.emit_progress(progress_callback, make_progress("failed"))
+    else:
+        await DownloadScheduler.emit_progress(progress_callback, make_progress("completed"))
+    return failures
 
 
 if TYPE_CHECKING:

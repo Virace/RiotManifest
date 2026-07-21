@@ -9,9 +9,11 @@ from riotmanifest.downloader.scheduler import (
     DownloadProgress,
     DownloadScheduler,
     GlobalChunkTask,
+    JobGroup,
     ProgressCallback,
     WriteTarget,
     iter_chunk_entries,
+    run_job_groups,
 )
 from riotmanifest.downloader.staging import (
     STAGING_SUFFIX,
@@ -29,6 +31,8 @@ __all__ = [
     "iter_chunk_entries",
     "ChunkRange",
     "BundleJob",
+    "JobGroup",
+    "run_job_groups",
     "DownloadScheduler",
     "DownloadProgress",
     "ProgressCallback",
