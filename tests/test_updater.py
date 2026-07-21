@@ -76,6 +76,7 @@ def _install_fake_network(manifest: PatcherManifest, chunk_datas: list[bytes], *
                 for target in task.targets:
                     output = staging_path(manifest.file_output(target.file))
                     await asyncio.to_thread(file_pool.write_at, output, data, target.file_offset)
+        return 0
 
     manifest.downloader.run_bundle_job_with_retry = types.MethodType(fake_run_job, manifest.downloader)
     return downloaded_chunk_ids
@@ -296,3 +297,105 @@ def test_successful_sync_archives_manifest(tmp_path: Path):
     assert state is not None
     assert state.manifest_id == "000000000000ABCD"
     assert archive.installed_manifest_path().read_bytes() == b"raw-manifest"
+
+
+def test_progress_events_cover_full_lifecycle(tmp_path: Path):
+    d1, d2 = b"aaaa", b"bbbb"
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    _add_file(new, "a.bin", [d1, d2])
+    _write_local(tmp_path, "a.bin", d1 + b"XXXX")  # 一半命中一半补洞
+    _install_fake_network(new, [d2])
+
+    events = []
+    updater = ManifestUpdater(new)
+    result = asyncio.run(updater.sync(progress_callback=events.append))
+
+    assert result.failed == []
+    phases = [event.phase for event in events]
+    # 事件序列：verify → plan_ready → 下载阶段 → finalize → 终态。
+    assert phases.index("verify") < phases.index("plan_ready") < phases.index("start")
+    assert phases.index("completed") < phases.index("finalize")
+    assert phases[-1] == "sync_completed"
+    # plan_ready 与下载阶段 start 完全同口径（bundle 作业数 / 压缩域字节）。
+    plan_ready = events[phases.index("plan_ready")]
+    start = events[phases.index("start")]
+    assert plan_ready.total_jobs == start.total_jobs
+    assert plan_ready.total_bytes == start.total_bytes
+    # verify 结束快照：分母为待验证文件解压域合计且已走满。
+    verify_events = [event for event in events if event.phase == "verify"]
+    assert verify_events[-1].total_bytes == 8
+    assert verify_events[-1].finished_bytes == 8
+
+
+def test_progress_events_when_nothing_to_download(tmp_path: Path):
+    d1 = b"aaaa"
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    _add_file(new, "a.bin", [d1])
+    _write_local(tmp_path, "a.bin", d1)
+    _install_fake_network(new, [])
+
+    events = []
+    updater = ManifestUpdater(new)
+    result = asyncio.run(updater.sync(progress_callback=events.append))
+
+    assert result.downloaded_bytes == 0
+    phases = [event.phase for event in events]
+    # 全命中也能第一时间拿到"没有要下的"：plan_ready 总量为 0。
+    plan_ready = events[phases.index("plan_ready")]
+    assert plan_ready.total_jobs == 0
+    assert plan_ready.total_bytes == 0
+    assert "start" not in phases  # 无下载批次
+    assert phases[-1] == "sync_completed"
+
+
+def test_verify_only_emits_plan_ready_with_pending_bytes(tmp_path: Path):
+    d1, d2 = b"aaaa", b"bbbb"
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    _add_file(new, "a.bin", [d1, d2])
+    _write_local(tmp_path, "a.bin", d1 + b"XXXX")
+    _install_fake_network(new, [d2])
+
+    events = []
+    updater = ManifestUpdater(new)
+    result = asyncio.run(updater.sync(mode=SyncMode.VERIFY_ONLY, progress_callback=events.append))
+
+    assert result.verify_only
+    assert result.missing_bytes == 4
+    phases = [event.phase for event in events]
+    # dry-run 也报"需要下载多少"（压缩域），但不下载、不 finalize。
+    plan_ready = events[phases.index("plan_ready")]
+    assert plan_ready.total_jobs == 1
+    assert plan_ready.total_bytes == 4
+    assert "start" not in phases
+    assert "finalize" not in phases
+    assert phases[-1] == "sync_completed"
+
+
+def test_sync_failed_final_phase_on_partial_failure(tmp_path: Path):
+    d1, d2 = b"aaaa", b"bbbb"
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    _add_file(new, "ok.bin", [d1], bundle_id=0x1001)
+    _add_file(new, "bad.bin", [d2], bundle_id=0x2002)
+    _install_fake_network(new, [d1, d2], fail_bundles={0x2002})
+
+    events = []
+    updater = ManifestUpdater(new)
+    result = asyncio.run(updater.sync(progress_callback=events.append))
+
+    assert result.failed == ["bad.bin"]
+    assert [event.phase for event in events][-1] == "sync_failed"
+
+
+def test_archive_disabled_skips_rman(tmp_path: Path):
+    d1 = b"aaaa"
+    new = _make_manifest(tmp_path, manifest_id=0xABCD, raw=b"raw-manifest")
+    _add_file(new, "a.bin", [d1])
+    _install_fake_network(new, [d1])
+
+    updater = ManifestUpdater(new, archive=False)
+    result = asyncio.run(updater.sync())
+
+    assert result.failed == []
+    assert (tmp_path / "a.bin").read_bytes() == d1
+    # 关闭存档：不创建 .rman、不写 installed.json。
+    assert not (tmp_path / ".rman").exists()
