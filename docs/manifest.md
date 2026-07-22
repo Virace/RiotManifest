@@ -66,6 +66,12 @@ PatcherManifest(
     bundle_url="https://lol.dyn.riotcdn.net/channels/public/bundles/",
     concurrency_limit=16,
     max_retries=5,
+    *,
+    gap_tolerance=None,
+    max_ranges_per_request=None,
+    full_bundle_threshold=None,
+    bundle_urls=None,
+    resolver=None,
 )
 ```
 
@@ -81,9 +87,36 @@ PatcherManifest(
   - 一般保持默认即可
 - `concurrency_limit`
   - 默认 bundle 级并发数
-  - 当前默认值是 `16`
+  - 当前默认值是 `16`（2026-07 真实基准：16 并发在批量下载场景已可打满
+    百 MB/s 级带宽，继续上调无可测收益）
 - `max_retries`
   - 单个 bundle 作业的最大重试次数
+- `gap_tolerance`
+  - Range 合并的 gap 容忍字节数：相邻 chunk 间隔不超过该值时合并为同一请求段
+  - 间隔字节会被一并下载，但不解压、不写盘，只消耗网络流量
+  - `None` 取默认值 `32KB`
+  - 注意：合并减少的是 multipart 请求内的段数，不是请求数；调大只在单
+    bundle 超过 `max_ranges_per_request` 段的高碎片场景才可能减少请求
+- `max_ranges_per_request`
+  - 单次 multipart 请求最多合并的 Range 段数
+  - Riot CDN 对超过 30 段的请求返回 400，`None` 取默认值 `30`
+- `full_bundle_threshold`
+  - 整包下载阈值：某 bundle 需下载字节占其总大小比例达到该值时，
+    改为不带 Range 头的整包 GET，本地切片
+  - 默认 `None` 禁用；显式启用建议用 `SUGGESTED_FULL_BUNDLE_THRESHOLD`（0.7）
+  - 整包不减少请求数（2026-07 实测），价值是绕开 CDN multipart 行为差异、
+    提升边缘缓存友好度，代价是多下未命中阈值部分的字节
+- `bundle_urls`
+  - 等价镜像 bundle 基础 URL 列表
+  - 给定时下载作业按 `bundle_id` 确定性分摊到各 URL，重试自动切换下一个 URL
+  - LoL 推荐配置（两个域名内容完全等价，DNS 背后是多家 CDN 加权轮换）：
+
+    ```python
+    bundle_urls=[
+        "https://lol.dyn.riotcdn.net/channels/public/bundles/",
+        "https://lol.secure.dyn.riotcdn.net/channels/public/bundles/",
+    ]
+    ```
 
 ### 重要默认值
 
@@ -91,6 +124,7 @@ PatcherManifest(
 
 - `DEFAULT_GAP_TOLERANCE = 32 * 1024`
 - `DEFAULT_MAX_RANGES_PER_REQUEST = 30`
+- `SUGGESTED_FULL_BUNDLE_THRESHOLD = 0.7`（整包路径默认关闭，启用时的建议阈值）
 - `DEFAULT_MIN_TRANSFER_SPEED_BYTES = 50 * 1024`
 - `DEFAULT_BASE_TIMEOUT_SECONDS = 30`
 - `DEFAULT_MAX_TIMEOUT_SECONDS = 180`
@@ -100,6 +134,7 @@ PatcherManifest(
 
 - 小间隔 chunk 会合并为同一次 range 请求
 - 单个请求最多合并一定数量的 ranges
+- 显式启用整包阈值后，需下载比例足够高的 bundle 直接整包 GET
 - 超时会根据作业大小与速度动态调整
 
 ## 下载行为

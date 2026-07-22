@@ -81,6 +81,16 @@ uv run python scripts/bench_downloader.py \
   --dry-run
 ```
 
+仅输出作业规划统计（作业数 / 整包数 / 请求与浪费字节 / 作业尺寸分位），
+用于对比 `gap_tolerance`、`full_bundle_threshold` 等参数的粒度效果：
+
+```bash
+uv run python scripts/bench_downloader.py '<manifest_url_or_path>' --plan-only
+```
+
+基准输出中 `throughput` 为全轮平均吞吐，`peak_seg` 为里程碑段速峰值；
+稀疏选择场景（如单个 WAD）受请求延迟主导，平均低于峰值属预期。
+
 
 ## 真实 manifest 样本
 
