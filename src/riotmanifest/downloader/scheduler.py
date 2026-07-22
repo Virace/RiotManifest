@@ -106,11 +106,17 @@ class ChunkRange:
 
 @dataclass
 class BundleJob:
-    """Bundle 下载任务."""
+    """Bundle 下载任务.
+
+    Attributes:
+        full_bundle: True 表示整包下载：请求不带 Range 头拉取完整 bundle，
+            本地按 `ranges` 切片；此时 `total_bytes` 为 bundle 总大小。
+    """
 
     bundle_id: int
     ranges: list[ChunkRange] = field(default_factory=list)
     total_bytes: int = 0
+    full_bundle: bool = False
 
 
 class DownloadScheduler:
@@ -209,14 +215,36 @@ class DownloadScheduler:
         *,
         entries: Iterable[ChunkEntry] | None = None,
     ) -> list[BundleJob]:
-        """把文件列表（或预构建 chunk 条目）转换为 bundle 维度的下载作业列表."""
+        """把文件列表（或预构建 chunk 条目）转换为 bundle 维度的下载作业列表.
+
+        需下载字节占 bundle 总大小比例达到 `full_bundle_threshold` 时，
+        该 bundle 收敛为单个整包作业（不带 Range 的完整 GET）；稀疏覆盖
+        的 bundle 维持 Range 作业——整包在稀疏场景只增加字节不减请求数。
+        """
         bundle_map = self.build_global_task_map(files, entries=entries)
+        threshold = getattr(self.manifest, "full_bundle_threshold", None)
         jobs: list[BundleJob] = []
 
         for bundle_id, tasks in bundle_map.items():
             ranges = self.merge_ranges(tasks, self.manifest.gap_tolerance)
             if not ranges:
                 continue
+
+            if threshold is not None:
+                bundle_chunks = tasks[0].chunk.bundle.chunks
+                bundle_size = bundle_chunks[-1].offset + bundle_chunks[-1].size if bundle_chunks else 0
+                covered = sum(chunk_range.end - chunk_range.start + 1 for chunk_range in ranges)
+                if bundle_size > 0 and covered / bundle_size >= threshold:
+                    jobs.append(
+                        BundleJob(
+                            bundle_id=bundle_id,
+                            ranges=ranges,
+                            total_bytes=bundle_size,
+                            full_bundle=True,
+                        )
+                    )
+                    continue
+
             for i in range(0, len(ranges), self.manifest.max_ranges_per_request):
                 job_ranges = ranges[i : i + self.manifest.max_ranges_per_request]
                 total_bytes = sum(chunk_range.end - chunk_range.start + 1 for chunk_range in job_ranges)
@@ -361,14 +389,34 @@ class DownloadScheduler:
         session: aiohttp.ClientSession,
         bundle_id: int,
         ranges: list[ChunkRange],
+        *,
+        full_bundle: bool = False,
+        expected_bytes: int | None = None,
+        attempt: int = 0,
     ) -> list[bytes]:
-        """请求并返回一个 bundle 中多个 Range 的压缩数据."""
+        """请求并返回一个 bundle 中多个 Range 的压缩数据.
+
+        Args:
+            session: 复用的 HTTP 会话。
+            bundle_id: 目标 bundle。
+            ranges: 请求段定义；整包模式下仅用于本地切片。
+            full_bundle: True 时不携带 Range 头拉取完整 bundle 并本地切片。
+            expected_bytes: 超时估算用的预期传输量；整包模式传 bundle 总大小。
+            attempt: 当前重试序号。配置多个等价 bundle URL 时按
+                `(bundle_id + attempt) % len(urls)` 选择基础 URL——作业确定性
+                分摊到各镜像域名，重试自动切换下一个（跨供应商 failover）。
+        """
         if not ranges:
             return []
 
-        url = urljoin(self.manifest.bundle_url, f"{bundle_id:016X}.bundle")
-        range_header = self.build_range_header(ranges)
-        total_bytes = sum(chunk_range.end - chunk_range.start + 1 for chunk_range in ranges)
+        base_urls = getattr(self.manifest, "bundle_urls", None) or [self.manifest.bundle_url]
+        base_url = base_urls[(bundle_id + attempt) % len(base_urls)]
+        url = urljoin(base_url, f"{bundle_id:016X}.bundle")
+        total_bytes = (
+            expected_bytes
+            if expected_bytes is not None
+            else sum(chunk_range.end - chunk_range.start + 1 for chunk_range in ranges)
+        )
         request_timeout = self.dynamic_request_timeout(
             total_bytes=total_bytes,
             base_timeout_seconds=self.manifest.DEFAULT_BASE_TIMEOUT_SECONDS,
@@ -378,21 +426,21 @@ class DownloadScheduler:
         )
 
         try:
-            headers = {
-                "Range": range_header,
-                "Accept-Encoding": "identity",
-            }
+            headers = {"Accept-Encoding": "identity"}
+            if not full_bundle:
+                headers["Range"] = self.build_range_header(ranges)
 
             async with session.get(url, headers=headers, timeout=request_timeout) as response:
                 if response.status not in (200, 206):
                     raise DownloadError(f"HTTP状态异常: {response.status}, bundle_id={bundle_id}")
 
-                if response.status == 200:
-                    logger.debug(
-                        "range请求降级为200完整体，本地切片: bundle_id={:016X}, ranges={}",
-                        bundle_id,
-                        len(ranges),
-                    )
+                if full_bundle or response.status == 200:
+                    if not full_bundle:
+                        logger.debug(
+                            "range请求降级为200完整体，本地切片: bundle_id={:016X}, ranges={}",
+                            bundle_id,
+                            len(ranges),
+                        )
                     payload = await response.read()
                     range_payloads = self.extract_ranges_from_full_body(
                         payload,
@@ -438,12 +486,17 @@ class DownloadScheduler:
         session: aiohttp.ClientSession,
         job: BundleJob,
         file_pool: FileHandlePool,
+        *,
+        attempt: int = 0,
     ) -> None:
         """执行单个 bundle 作业：下载、解压、校验并扇出写盘."""
         range_payloads = await self.fetch_ranges_data(
             session=session,
             bundle_id=job.bundle_id,
             ranges=job.ranges,
+            full_bundle=job.full_bundle,
+            expected_bytes=job.total_bytes if job.full_bundle else None,
+            attempt=attempt,
         )
 
         for chunk_range, range_data in zip(job.ranges, range_payloads, strict=False):
@@ -506,6 +559,7 @@ class DownloadScheduler:
                     session=session,
                     job=job,
                     file_pool=file_pool,
+                    attempt=attempt,
                 )
                 return attempt
             except (DownloadError, DecompressError, OSError) as exc:
@@ -783,9 +837,21 @@ async def run_job_groups(
     )
     worker_count = max(1, min(effective_concurrency, total_jobs))
     logger.info("下载批次开始: jobs={}, total_bytes={}, workers={}", total_jobs, total_bytes, worker_count)
+    # 任一清单注入了自定义 resolver 即对整个批次生效；此时关闭 aiohttp 内建
+    # DNS 缓存，保证 resolver 每次连接都能轮转返回不同的边缘 IP。
+    resolver = next(
+        (
+            group.scheduler.manifest.resolver
+            for group in groups
+            if getattr(group.scheduler.manifest, "resolver", None) is not None
+        ),
+        None,
+    )
     connector = aiohttp.TCPConnector(
         limit=max(worker_count * 4, 16),
         limit_per_host=max(worker_count * 4, 16),
+        resolver=resolver,
+        use_dns_cache=resolver is None,
     )
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
     file_pool = FileHandlePool(max_handles=max(worker_count * 8, 256))

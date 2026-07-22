@@ -18,7 +18,9 @@
    - Manifest / WAD 差异分析与 BIN 路径回填
 6. `docs/game.md`
    - `LeagueManifestResolver`、`LeagueManifestInspector`、区域语义、版本对象与兼容层
-7. `docs/TESTING.md`
+7. `docs/edge.md`
+   - 可选的边缘 IP 优选层（稳定性兜底，需 `riotmanifest[edge]`）
+8. `docs/TESTING.md`
    - 测试、验证方式与基准说明
 
 ## 按任务选文档
@@ -53,6 +55,12 @@
 
 - 看 `docs/game.md`
 - `LeagueManifestInspector` 支持单清单识别和双清单配对
+
+### 我想让下载避开劣质 CDN 节点 / DNS 异常时段
+
+- 看 `docs/edge.md`
+- 可选功能，需 `pip install riotmanifest[edge]`
+- 入口：`riotmanifest.edge.EdgeSelector`（不在包根导出）
 
 ## 包根导出一览
 

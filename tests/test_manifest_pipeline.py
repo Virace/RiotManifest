@@ -198,7 +198,7 @@ def test_process_bundle_job_hash_mismatch(tmp_path: Path):
     chunk_range = ChunkRange(start=0, end=len(compressed) - 1, tasks=[task])
     job = BundleJob(bundle_id=bundle.bundle_id, ranges=[chunk_range])
 
-    async def fake_fetch(self, session, bundle_id, ranges):
+    async def fake_fetch(self, session, bundle_id, ranges, **kwargs):
         return [compressed]
 
     manifest.downloader.fetch_ranges_data = types.MethodType(fake_fetch, manifest.downloader)
