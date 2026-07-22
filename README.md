@@ -36,7 +36,10 @@ async def main() -> None:
     manifest = PatcherManifest(
         "https://lol.secure.dyn.riotcdn.net/channels/public/releases/CB3A1B2A17ED9AAB.manifest",
         path="./out",
-        bundle_url="https://lol.dyn.riotcdn.net/channels/public/bundles/",
+        bundle_urls=[
+            "https://lol.dyn.riotcdn.net/channels/public/bundles/",
+            "https://lol.secure.dyn.riotcdn.net/channels/public/bundles/",
+        ],
     )
 
     files = list(manifest.filter_files(flag="zh_CN", pattern="wad.client"))
@@ -47,7 +50,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-默认并发为 `16`。
+默认并发为 `16`。`bundle_urls` 可选：给定多个等价镜像时，下载作业会分摊到各域名，重试自动切换域名；只需单一地址时可继续用 `bundle_url`。下载策略参数（gap 合并、整包阈值、并发等）均可在构造时改写，见 `docs/manifest.md`。
 
 ## 常见任务
 
@@ -154,9 +157,14 @@ print(str(pair.version))  # 16.5
 
 ### 下载
 
-- 默认并发 `16` 是当前推荐值。
+- 默认并发 `16` 是当前推荐值（真实基准：批量下载可打满百 MB/s 级带宽）。
 - 网络或磁盘较弱时可降到 `8~12`。
-- 机器配置较好且网络稳定时，可尝试 `16~24`。
+- 稀疏下载（如只取单个 WAD）受请求延迟主导，速度低于全量下载属预期行为，
+  官方客户端部分更新同样如此。
+- 传入 `bundle_urls` 双域名镜像可获得 CDN 供应商多样性与重试跨域名切换。
+- 需要进一步避开劣质节点 / DNS 异常时段时，可启用可选的边缘 IP 优选层
+  （`pip install riotmanifest[edge]`，见 [docs/edge.md](docs/edge.md)）；
+  定位是稳定兜底而非提速。
 
 ### 日志
 

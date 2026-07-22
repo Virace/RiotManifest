@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import shutil
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -18,6 +19,7 @@ from statistics import median
 from time import perf_counter
 
 from riotmanifest.downloader import DownloadProgress
+from riotmanifest.downloader.scheduler import BundleJob, DownloadScheduler
 from riotmanifest.manifest import PatcherFile, PatcherManifest
 
 DEFAULT_FLAG = "ja_JP"
@@ -54,7 +56,27 @@ class RoundBenchResult:
     downloaded_bytes: int
     downloaded_gib: float
     throughput_mb_per_sec: float
+    peak_segment_speed_mb_per_sec: float
     milestones: tuple[MilestoneResult, ...]
+
+
+@dataclass(frozen=True)
+class JobStats:
+    """作业规划统计，衡量请求粒度与合并/整包带来的额外下载.
+
+    字节口径均为 bundle 压缩域：`needed_bytes` 是目标文件全部 chunk 按
+    chunk_id 去重后的压缩大小之和，`waste_bytes` 是请求覆盖字节超出
+    实际所需的部分（gap 合并或整包 GET 引入）。
+    """
+
+    job_count: int
+    full_bundle_jobs: int
+    total_request_bytes: int
+    needed_bytes: int
+    waste_bytes: int
+    p50_job_bytes: int
+    p90_job_bytes: int
+    max_job_bytes: int
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -122,7 +144,40 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="仅输出计划，不执行下载。",
     )
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="仅输出作业规划统计，不执行下载。",
+    )
+    parser.add_argument(
+        "--gap-tolerance",
+        type=int,
+        default=None,
+        help="Range 合并 gap 容忍字节数；缺省用库默认值。",
+    )
+    parser.add_argument(
+        "--full-bundle-threshold",
+        default=None,
+        help="整包下载阈值（0-1 小数）；传 none 禁用整包路径；缺省用库默认值。",
+    )
+    parser.add_argument(
+        "--bundle-urls",
+        default=None,
+        help="逗号分隔的等价镜像 bundle URL 列表；缺省仅用清单默认地址。",
+    )
     return parser
+
+
+def _parse_full_bundle_threshold(value: str | None) -> float | None | object:
+    """解析 --full-bundle-threshold：None 表示未指定（用库默认），"none" 表示禁用."""
+    if value is None:
+        return _UNSET
+    if value.strip().lower() == "none":
+        return None
+    return float(value)
+
+
+_UNSET = object()
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -156,6 +211,57 @@ def _select_target_files(
             f"未筛到可下载文件：flag={flag!r}, pattern={pattern!r}, max_files={max_files}"
         )
     return tuple(selected)
+
+
+def _percentile(sorted_values: list[int], ratio: float) -> int:
+    """按最近秩法取分位值，输入必须已升序排序；空列表返回 0."""
+    if not sorted_values:
+        return 0
+    index = min(len(sorted_values) - 1, max(0, math.ceil(ratio * len(sorted_values)) - 1))
+    return sorted_values[index]
+
+
+def _compute_job_stats(
+    files: tuple[PatcherFile, ...],
+    jobs: list[BundleJob],
+) -> JobStats:
+    """统计作业规划的请求粒度指标，作为请求合并/整包策略的对照数据."""
+    job_bytes = sorted(DownloadScheduler.job_total_bytes(job) for job in jobs)
+    total_request_bytes = sum(job_bytes)
+
+    unique_chunk_sizes: dict[int, int] = {}
+    for file in files:
+        for chunk in file.chunks:
+            unique_chunk_sizes.setdefault(chunk.chunk_id, chunk.size)
+    needed_bytes = sum(unique_chunk_sizes.values())
+
+    return JobStats(
+        job_count=len(jobs),
+        full_bundle_jobs=sum(1 for job in jobs if getattr(job, "full_bundle", False)),
+        total_request_bytes=total_request_bytes,
+        needed_bytes=needed_bytes,
+        waste_bytes=total_request_bytes - needed_bytes,
+        p50_job_bytes=_percentile(job_bytes, 0.5),
+        p90_job_bytes=_percentile(job_bytes, 0.9),
+        max_job_bytes=job_bytes[-1] if job_bytes else 0,
+    )
+
+
+def _print_job_stats(stats: JobStats) -> None:
+    """输出作业规划统计摘要."""
+    print(
+        "[BENCH] job_stats: "
+        f"jobs={stats.job_count}, full_bundle_jobs={stats.full_bundle_jobs}, "
+        f"request={stats.total_request_bytes / MIB:.2f}MiB, "
+        f"needed={stats.needed_bytes / MIB:.2f}MiB, "
+        f"waste={stats.waste_bytes / MIB:.2f}MiB"
+    )
+    print(
+        "[BENCH] job_stats: "
+        f"p50_job={stats.p50_job_bytes / MIB:.2f}MiB, "
+        f"p90_job={stats.p90_job_bytes / MIB:.2f}MiB, "
+        f"max_job={stats.max_job_bytes / MIB:.2f}MiB"
+    )
 
 
 def _verify_and_sum_downloaded_bytes(
@@ -262,6 +368,7 @@ def _run_single_round(
     downloaded_bytes = _verify_and_sum_downloaded_bytes(manifest, files)
     throughput = downloaded_bytes / MIB / max(elapsed_seconds, 1e-9)
     milestones = _build_milestones(samples)
+    peak_segment_speed = max((item.segment_speed_mb_per_sec for item in milestones), default=0.0)
 
     round_result = RoundBenchResult(
         round_index=round_index,
@@ -270,6 +377,7 @@ def _run_single_round(
         downloaded_bytes=downloaded_bytes,
         downloaded_gib=round(downloaded_bytes / GIB, 3),
         throughput_mb_per_sec=round(throughput, 2),
+        peak_segment_speed_mb_per_sec=round(peak_segment_speed, 2),
         milestones=milestones,
     )
 
@@ -287,16 +395,19 @@ def _build_summary_payload(
     bundle_count: int,
     range_count: int,
     unique_chunk_count: int,
+    job_stats: JobStats,
     rounds: tuple[RoundBenchResult, ...],
 ) -> dict[str, object]:
     """构建可序列化的汇总 JSON 对象."""
     throughput_values = [result.throughput_mb_per_sec for result in rounds]
     elapsed_values = [result.elapsed_seconds for result in rounds]
+    peak_values = [result.peak_segment_speed_mb_per_sec for result in rounds]
 
     aggregate = {
         "median_throughput_mb_per_sec": round(float(median(throughput_values)), 2),
         "best_throughput_mb_per_sec": round(max(throughput_values), 2),
         "worst_throughput_mb_per_sec": round(min(throughput_values), 2),
+        "peak_segment_speed_mb_per_sec": round(max(peak_values), 2),
         "median_elapsed_seconds": round(float(median(elapsed_values)), 3),
     }
 
@@ -324,6 +435,7 @@ def _build_summary_payload(
             "range_count": range_count,
             "unique_chunk_count": unique_chunk_count,
         },
+        "job_stats": asdict(job_stats),
         "aggregate": aggregate,
         "rounds": [asdict(item) for item in rounds],
     }
@@ -362,6 +474,7 @@ def _print_round_result(result: RoundBenchResult) -> None:
         "[BENCH] "
         f"round={result.round_index} elapsed={result.elapsed_seconds:.3f}s "
         f"throughput={result.throughput_mb_per_sec:.2f}MB/s "
+        f"peak_seg={result.peak_segment_speed_mb_per_sec:.2f}MB/s "
         f"downloaded={result.downloaded_gib:.3f}GiB"
     )
     for milestone in result.milestones:
@@ -392,15 +505,24 @@ def main() -> None:
 
     probe_dir = args.output_root / "_probe"
     probe_dir.mkdir(parents=True, exist_ok=True)
+    manifest_kwargs: dict[str, object] = {}
+    if args.gap_tolerance is not None:
+        manifest_kwargs["gap_tolerance"] = args.gap_tolerance
+    threshold = _parse_full_bundle_threshold(args.full_bundle_threshold)
+    if threshold is not _UNSET:
+        manifest_kwargs["full_bundle_threshold"] = threshold
+    if args.bundle_urls:
+        manifest_kwargs["bundle_urls"] = [item.strip() for item in args.bundle_urls.split(",") if item.strip()]
     manifest = PatcherManifest(
         file=args.manifest,
         path=str(probe_dir),
         concurrency_limit=args.concurrency,
+        **manifest_kwargs,
     )
     target_files = _select_target_files(
         manifest,
-        flag=args.flag,
-        pattern=args.pattern,
+        flag=args.flag or None,
+        pattern=args.pattern or None,
         max_files=args.max_files,
     )
     planned_bytes = sum(file.size for file in target_files)
@@ -410,6 +532,7 @@ def main() -> None:
     unique_chunk_count = sum(
         len(tasks) for tasks in manifest.downloader.build_global_task_map(list(target_files)).values()
     )
+    job_stats = _compute_job_stats(target_files, jobs)
     _print_plan(
         manifest=args.manifest,
         flag=args.flag,
@@ -423,6 +546,12 @@ def main() -> None:
         range_count=range_count,
         unique_chunk_count=unique_chunk_count,
     )
+    _print_job_stats(job_stats)
+
+    if args.plan_only:
+        print("[BENCH] plan-only 模式，仅输出作业规划统计。")
+        shutil.rmtree(probe_dir, ignore_errors=True)
+        return
 
     if args.dry_run:
         print("[BENCH] dry-run 模式，不执行下载。")
@@ -455,6 +584,7 @@ def main() -> None:
         bundle_count=bundle_count,
         range_count=range_count,
         unique_chunk_count=unique_chunk_count,
+        job_stats=job_stats,
         rounds=tuple(rounds),
     )
     _write_json(args.output_json, summary)
@@ -464,7 +594,8 @@ def main() -> None:
         "[BENCH] "
         f"median={aggregate['median_throughput_mb_per_sec']:.2f}MB/s "
         f"best={aggregate['best_throughput_mb_per_sec']:.2f}MB/s "
-        f"worst={aggregate['worst_throughput_mb_per_sec']:.2f}MB/s"
+        f"worst={aggregate['worst_throughput_mb_per_sec']:.2f}MB/s "
+        f"peak_seg={aggregate['peak_segment_speed_mb_per_sec']:.2f}MB/s"
     )
     print(f"[BENCH] summary={args.output_json}")
 

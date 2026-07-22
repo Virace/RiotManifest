@@ -26,6 +26,11 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
+[project.optional-dependencies]
+edge = [
+    "dnspython>=2.8",
+]
+
 [project.urls]
 Homepage = "https://github.com/Virace/RiotManifest"
 Repository = "https://github.com/Virace/RiotManifest"
@@ -65,6 +70,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "ruff>=0.15.4",
+    "dnspython>=2.8",
 ]
 
 [tool.pytest.ini_options]

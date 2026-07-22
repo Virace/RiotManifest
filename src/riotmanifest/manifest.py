@@ -10,8 +10,8 @@ import hashlib
 import io
 import os
 import re
-from collections.abc import Iterable
-from typing import BinaryIO, Union
+from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING, BinaryIO, Union
 from urllib.parse import urljoin, urlparse
 
 import pyzstd
@@ -27,6 +27,10 @@ from riotmanifest.core.errors import (
 from riotmanifest.downloader.scheduler import DownloadScheduler, ProgressCallback
 from riotmanifest.downloader.staging import staging_path
 from riotmanifest.utils.http_client import HttpClientError, http_get_bytes
+
+if TYPE_CHECKING:
+    # 仅类型标注使用，避免运行时对 aiohttp.abc 的硬依赖。
+    from aiohttp.abc import AbstractResolver
 
 RETRY_LIMIT = 5
 
@@ -221,6 +225,9 @@ class PatcherManifest:
 
     DEFAULT_GAP_TOLERANCE = 32 * 1024
     DEFAULT_MAX_RANGES_PER_REQUEST = 30
+    # 整包路径默认关闭；这是显式启用时的建议阈值（2026-07 真实基准：
+    # 批量与稀疏场景请求数均不因整包减少，默认开启只增加浪费流量）。
+    SUGGESTED_FULL_BUNDLE_THRESHOLD = 0.7
     DEFAULT_MIN_TRANSFER_SPEED_BYTES = 50 * 1024
     DEFAULT_BASE_TIMEOUT_SECONDS = 30
     DEFAULT_MAX_TIMEOUT_SECONDS = 3 * 60
@@ -232,6 +239,12 @@ class PatcherManifest:
         bundle_url: str = "https://lol.dyn.riotcdn.net/channels/public/bundles/",
         concurrency_limit: int = 16,
         max_retries: int = RETRY_LIMIT,
+        *,
+        gap_tolerance: int | None = None,
+        max_ranges_per_request: int | None = None,
+        full_bundle_threshold: float | None = None,
+        bundle_urls: Sequence[str] | None = None,
+        resolver: AbstractResolver | None = None,
     ):
         """初始化 manifest 对象并完成解析.
 
@@ -241,6 +254,25 @@ class PatcherManifest:
             bundle_url: bundle 基础 URL。
             concurrency_limit: 默认 bundle 并发数。
             max_retries: 单个 bundle 任务最大重试次数。
+            bundle_urls: 等价镜像 bundle 基础 URL 列表。给定时下载作业按
+                bundle_id 确定性分摊到各 URL，且重试自动切换下一个 URL；
+                首个元素同时作为 `bundle_url`（单 URL 消费方兼容）。LoL 推荐
+                同时传入 `lol.dyn.riotcdn.net` 与 `lol.secure.dyn.riotcdn.net`
+                两个等价域名以获得 CDN 供应商多样性。None 表示仅用 `bundle_url`。
+            resolver: 自定义 aiohttp DNS 解析器（如 `riotmanifest.edge.EdgeSelector`
+                提供的边缘优选 resolver）。注入后下载连接的域名解析交由该对象，
+                并禁用 aiohttp 内建 DNS 缓存以保证解析结果轮转生效。None 走
+                系统 DNS 默认路径。
+            gap_tolerance: Range 合并的 gap 容忍字节数；相邻 chunk 间隔不超过该值
+                时合并为同一请求段（间隔字节会被一并下载但不解压）。None 取
+                `DEFAULT_GAP_TOLERANCE`。
+            max_ranges_per_request: 单次 multipart 请求的最大 Range 段数（Riot CDN
+                对 >30 段返回 400）。None 取 `DEFAULT_MAX_RANGES_PER_REQUEST`。
+            full_bundle_threshold: 整包下载阈值。当某 bundle 需下载字节占其总大小
+                的比例达到该值时，改为不带 Range 头的整包 GET（多余字节只耗网络，
+                不解压不写盘）。默认 None 禁用，始终按 Range 下载；显式启用时
+                建议值见 `SUGGESTED_FULL_BUNDLE_THRESHOLD`。整包不减少请求数，
+                价值在于绕开 CDN multipart 行为差异与提升边缘缓存友好度。
 
         Raises:
             ValueError: file 为空或路径无效时抛出。
@@ -255,10 +287,15 @@ class PatcherManifest:
         self.manifest_id: int = 0
 
         self.path = path
-        self.bundle_url = bundle_url
+        self.bundle_urls = [str(url) for url in bundle_urls] if bundle_urls else [bundle_url]
+        self.bundle_url = self.bundle_urls[0]
         self.concurrency_limit = concurrency_limit
-        self.gap_tolerance = self.DEFAULT_GAP_TOLERANCE
-        self.max_ranges_per_request = self.DEFAULT_MAX_RANGES_PER_REQUEST
+        self.gap_tolerance = gap_tolerance if gap_tolerance is not None else self.DEFAULT_GAP_TOLERANCE
+        self.max_ranges_per_request = (
+            max_ranges_per_request if max_ranges_per_request is not None else self.DEFAULT_MAX_RANGES_PER_REQUEST
+        )
+        self.full_bundle_threshold = full_bundle_threshold
+        self.resolver = resolver
         self.max_retries = max(1, max_retries)
         self.downloader = DownloadScheduler(self)
 

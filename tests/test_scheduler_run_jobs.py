@@ -1,9 +1,11 @@
-"""bundle 作业运行层单测：重试计数、成功传输日志与多组联合调度."""
+"""bundle 作业运行层单测：重试计数、成功传输日志、多组联合调度与 resolver 注入."""
 
 import asyncio
+import socket
 import types
 from pathlib import Path
 
+import aiohttp
 from loguru import logger
 
 from riotmanifest.core.errors import DownloadError
@@ -40,7 +42,7 @@ def test_retry_returns_attempt_count(tmp_path: Path, monkeypatch):
     scheduler = manifest.downloader
     attempts = {"count": 0}
 
-    async def flaky(self, session, job, file_pool):
+    async def flaky(self, session, job, file_pool, *, attempt=0):
         attempts["count"] += 1
         if attempts["count"] < 3:
             raise DownloadError("mock 前两次失败")
@@ -127,3 +129,58 @@ def test_run_job_groups_merges_progress_and_attributes_failures(tmp_path: Path):
 
 def test_run_job_groups_empty_returns_empty():
     assert asyncio.run(run_job_groups([])) == []
+
+
+class _FakeResolver(aiohttp.abc.AbstractResolver):
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        raise AssertionError("假作业不应触发真实解析")
+
+    async def close(self):
+        return None
+
+
+def _capture_connector_kwargs(monkeypatch) -> dict:
+    captured: dict = {}
+
+    class _CapturingConnector(aiohttp.TCPConnector):
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("riotmanifest.downloader.scheduler.aiohttp.TCPConnector", _CapturingConnector)
+    return captured
+
+
+def _run_single_ok_job(manifest: PatcherManifest) -> None:
+    async def ok(self, session, job, file_pool):
+        return 0
+
+    manifest.downloader.run_bundle_job_with_retry = types.MethodType(ok, manifest.downloader)
+    asyncio.run(
+        run_job_groups(
+            [JobGroup(scheduler=manifest.downloader, jobs=[BundleJob(bundle_id=0x1, total_bytes=1)])],
+            progress_interval_seconds=None,
+        )
+    )
+
+
+def test_run_job_groups_default_resolver_keeps_dns_cache(tmp_path: Path, monkeypatch):
+    captured = _capture_connector_kwargs(monkeypatch)
+    manifest = _make_manifest(tmp_path)
+
+    _run_single_ok_job(manifest)
+
+    assert captured["resolver"] is None
+    assert captured["use_dns_cache"] is True
+
+
+def test_run_job_groups_injects_custom_resolver_and_disables_dns_cache(tmp_path: Path, monkeypatch):
+    captured = _capture_connector_kwargs(monkeypatch)
+    manifest = _make_manifest(tmp_path)
+    resolver = _FakeResolver()
+    manifest.resolver = resolver
+
+    _run_single_ok_job(manifest)
+
+    assert captured["resolver"] is resolver
+    assert captured["use_dns_cache"] is False
