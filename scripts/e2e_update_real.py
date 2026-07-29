@@ -8,8 +8,8 @@
 本仓库只保存链接不引入其内容）。16.3→16.4 恰好跨越 Riot 的
 HKDF→BLAKE3 哈希迁移边界，是最有代表性的更新场景之一。
 
-流程：全量下载少量小文件 → 人为损坏后 REPAIR 修复 → 跨版本增量更新，
-每一步都以 chunk 级哈希验证收尾；断言失败即非零退出。
+流程：同清单分两次部分安装并验证状态累积 → 人为损坏后 REPAIR 修复 →
+跨版本增量更新，每一步都以 chunk 级哈希验证收尾；断言失败即非零退出。
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def _mb(size: int) -> str:
 
 
 def main() -> None:
-    """执行三段式冒烟：全量下载 → REPAIR 修复 → 跨版本增量更新."""
+    """执行三段式冒烟：分批安装 → REPAIR 修复 → 跨版本增量更新."""
     with tempfile.TemporaryDirectory(prefix="riotmanifest_update_e2e_") as out_dir:
         old_manifest = PatcherManifest(file=OLD_MANIFEST_URL, path=out_dir)
         new_manifest = PatcherManifest(file=NEW_MANIFEST_URL, path=out_dir)
@@ -67,16 +67,24 @@ def main() -> None:
         new_files = [new_manifest.files[name] for name in target_names]
         archive = ManifestArchive(out_dir)
 
-        # 1. 全量下载（无本地状态）。
-        result_initial = asyncio.run(ManifestUpdater(old_manifest).sync(old_files))
-        assert result_initial.failed == [], f"全量下载失败: {result_initial.failed}"
-        assert result_initial.downloaded_bytes > 0
+        # 1. 同一清单分两次受管理安装，状态必须累积实际确认的文件。
+        result_first = asyncio.run(ManifestUpdater(old_manifest).sync(old_files[:1]))
+        assert result_first.failed == [], f"首次部分安装失败: {result_first.failed}"
+        state = archive.load_installed()
+        assert state is not None
+        assert state.files == [old_files[0].name]
+
+        result_second = asyncio.run(ManifestUpdater(old_manifest).sync(old_files[1:]))
+        assert result_second.failed == [], f"第二次部分安装失败: {result_second.failed}"
+        downloaded_initial = result_first.downloaded_bytes + result_second.downloaded_bytes
+        assert downloaded_initial > 0
         for file in old_files:
             check = verify_file_chunks(file, os.path.join(out_dir, file.name))
-            assert check.complete, f"全量下载后校验失败: {file.name}"
+            assert check.complete, f"分批安装后校验失败: {file.name}"
         state = archive.load_installed()
         assert state is not None and state.manifest_id == f"{old_manifest.manifest_id:016X}"
-        print(f"[E2E] 全量: downloaded={_mb(result_initial.downloaded_bytes)} -> installed={state.manifest_id}")
+        assert state.files == sorted(target_names)
+        print(f"[E2E] 分批安装: downloaded={_mb(downloaded_initial)} -> installed={state.manifest_id}")
 
         # 2. 人为损坏一个文件中部 → REPAIR 应只补坏块。
         corrupt_file = old_files[0]
@@ -102,12 +110,11 @@ def main() -> None:
             assert check.complete, f"更新后校验失败: {file.name}"
         state = archive.load_installed()
         assert state is not None and state.manifest_id == f"{new_manifest.manifest_id:016X}"
+        assert state.files == sorted(target_names)
 
         # 未变化文件应被文件级跳过（哈希迁移边界上未变化文件可能极少，容忍为空）。
         unchanged = [
-            name
-            for name in target_names
-            if old_manifest.files[name].hexdigest() == new_manifest.files[name].hexdigest()
+            name for name in target_names if old_manifest.files[name].hexdigest() == new_manifest.files[name].hexdigest()
         ]
         for name in unchanged:
             assert result_update.actions[name] == FileAction.SKIP

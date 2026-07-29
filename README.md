@@ -58,19 +58,23 @@ if __name__ == "__main__":
 
 - 入口：`PatcherManifest`
 - 适合：批量下载 `wad.client`、语言资源、配置文件
+- 这是无状态的单独下载：不读取或写入 `.rman/installed.json`，也不清理其他文件
 
-### 2. 增量更新 / 修复本地文件
+### 2. 受管理安装 / 增量更新 / 修复本地文件
 
 ```python
 from riotmanifest import ManifestUpdater
 
-updater = ManifestUpdater(manifest)  # 旧清单自动从本地存档解析
+updater = ManifestUpdater(manifest)  # 受管理安装：旧清单和文件覆盖从本地状态解析
 result = await updater.sync(files)
 print(result.downloaded_bytes, result.reused_bytes)
 ```
 
 - 本地已有数据逐 chunk 验证复用，只下载变化部分
-- 首次运行自动退化为全量；成功后清单自动存档，下次即增量
+- `installed.json` schema 2 记录实际确认落盘的文件；多次部分同步会累积可信覆盖
+- 只有状态已记录、且磁盘上仍是声明大小的普通文件，未变化文件才会快速跳过
+- 首次运行和 schema 1 旧状态都会先验证；成功后写入 schema 2
+- `archive=False` 完全无状态，不读取、不写入安装状态，也不执行受管理清理
 - 多清单（如 LCU + GAME）联合同步用 `sync_many`：单 worker 池、跨清单合计的单一进度流
 - 详见 [docs/update.md](docs/update.md)
 

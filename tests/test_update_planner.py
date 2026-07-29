@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from riotmanifest.diff.manifest_diff import (
     ManifestDiffEntry,
     ManifestDiffReport,
@@ -12,10 +14,10 @@ from riotmanifest.manifest import PatcherFile
 from riotmanifest.update.planner import FileAction, build_update_plan
 
 
-def _make_file(name: str, *, link: str = "") -> PatcherFile:
+def _make_file(name: str, *, link: str = "", size: int = 4) -> PatcherFile:
     return PatcherFile(
         name=name,
-        size=4,
+        size=size,
         link=link,
         flags=None,
         chunks=[],
@@ -66,9 +68,7 @@ def _report(
         removed=tuple(_entry(path, "removed") for path in removed),
         changed=tuple(_entry(path, "changed") for path in changed),
         unchanged=tuple(_entry(path, "unchanged") for path in unchanged),
-        moved=tuple(
-            ManifestMovedEntry(old_path=old, new_path=new, size=4, chunk_digest="d") for old, new in moved
-        ),
+        moved=tuple(ManifestMovedEntry(old_path=old, new_path=new, size=4, chunk_digest="d") for old, new in moved),
     )
 
 
@@ -86,7 +86,14 @@ def test_five_status_mapping(tmp_path: Path):
         moved=(("moved-old.bin", "moved-new.bin"),),
     )
 
-    plan = build_update_plan(report, files)
+    (tmp_path / "keep.bin").write_bytes(b"keep")
+    (tmp_path / "moved-old.bin").write_bytes(b"move")
+    plan = build_update_plan(
+        report,
+        files,
+        managed_files={"keep.bin", "gone.bin", "moved-old.bin"},
+        output_dir=tmp_path,
+    )
     actions = _actions(plan)
 
     assert actions["keep.bin"] == FileAction.SKIP
@@ -116,7 +123,7 @@ def test_files_subset_restricts_plan():
     files = [_make_file("only.bin")]
     report = _report(changed=("only.bin", "other.bin"), removed=("gone.bin",))
 
-    plan = build_update_plan(report, files)
+    plan = build_update_plan(report, files, managed_files={"gone.bin"})
     paths = {entry.path for entry in plan.entries}
 
     # other.bin 不在目标文件集内，不进计划；REMOVE 仍以报告为准。
@@ -141,11 +148,67 @@ def test_link_file_is_skip_even_when_changed():
     assert _actions(plan)["a.lnk"] == FileAction.SKIP
 
 
-def test_by_action_helper():
+def test_by_action_helper(tmp_path: Path):
     files = [_make_file("a.bin"), _make_file("b.bin")]
     report = _report(changed=("a.bin",), unchanged=("b.bin",))
 
-    plan = build_update_plan(report, files)
+    (tmp_path / "b.bin").write_bytes(b"data")
+    plan = build_update_plan(report, files, managed_files={"b.bin"}, output_dir=tmp_path)
 
     assert [entry.path for entry in plan.by_action(FileAction.PATCH)] == ["a.bin"]
     assert [entry.path for entry in plan.by_action(FileAction.SKIP)] == ["b.bin"]
+
+
+def test_managed_actions_require_membership_and_disk_gate(tmp_path: Path):
+    files = [_make_file("keep.bin"), _make_file("moved-new.bin")]
+    report = _report(
+        unchanged=("keep.bin",),
+        added=("moved-new.bin",),
+        removed=("gone.bin", "moved-old.bin", "unmanaged.bin"),
+        moved=(("moved-old.bin", "moved-new.bin"),),
+    )
+    (tmp_path / "keep.bin").write_bytes(b"bad")
+    (tmp_path / "moved-old.bin").write_bytes(b"move")
+
+    plan = build_update_plan(
+        report,
+        files,
+        managed_files={"keep.bin", "gone.bin"},
+        output_dir=tmp_path,
+    )
+    actions = _actions(plan)
+
+    assert actions["keep.bin"] == FileAction.PATCH
+    assert actions["moved-new.bin"] == FileAction.PATCH
+    assert actions["gone.bin"] == FileAction.REMOVE
+    assert "unmanaged.bin" not in actions
+
+
+def test_symlink_cannot_authorize_skip_or_move(tmp_path: Path):
+    real = tmp_path / "real.bin"
+    real.write_bytes(b"data")
+    keep_link = tmp_path / "keep.bin"
+    move_link = tmp_path / "moved-old.bin"
+    try:
+        keep_link.symlink_to(real)
+        move_link.symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"当前环境不允许创建符号链接: {exc}")
+
+    files = [_make_file("keep.bin"), _make_file("moved-new.bin")]
+    report = _report(
+        unchanged=("keep.bin",),
+        added=("moved-new.bin",),
+        removed=("moved-old.bin",),
+        moved=(("moved-old.bin", "moved-new.bin"),),
+    )
+    plan = build_update_plan(
+        report,
+        files,
+        managed_files={"keep.bin", "moved-old.bin"},
+        output_dir=tmp_path,
+    )
+
+    actions = _actions(plan)
+    assert actions["keep.bin"] == FileAction.PATCH
+    assert actions["moved-new.bin"] == FileAction.PATCH

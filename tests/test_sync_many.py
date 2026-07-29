@@ -122,7 +122,9 @@ def test_sync_many_downloads_into_separate_roots(tmp_path: Path):
     assert phases.count("start") == 1
     assert phases[-1] == "sync_completed"
     # archive 语义按 target 独立：lcu 推进存档，game 关闭存档。
-    assert ManifestArchive(tmp_path / "lcu").load_installed() is not None
+    lcu_state = ManifestArchive(tmp_path / "lcu").load_installed()
+    assert lcu_state is not None
+    assert lcu_state.files == ["client.dat"]
     assert not (tmp_path / "game/.rman").exists()
 
 
@@ -144,7 +146,9 @@ def test_sync_many_partial_failure_isolated_per_target(tmp_path: Path):
     assert results[1].failures[0].bundle_id == 0x2002
     # 失败只影响所属 target：成功侧推进存档，失败侧不推进。
     assert (tmp_path / "lcu/client.dat").read_bytes() == d1
-    assert ManifestArchive(tmp_path / "lcu").load_installed() is not None
+    lcu_state = ManifestArchive(tmp_path / "lcu").load_installed()
+    assert lcu_state is not None
+    assert lcu_state.files == ["client.dat"]
     assert ManifestArchive(tmp_path / "game").load_installed() is None
 
 

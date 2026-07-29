@@ -8,13 +8,17 @@
 - moved → MOVE（本地复制，不下载）
 - removed → REMOVE（删除旧清单声明的文件）
 
-无旧清单（report=None）时全部按 PATCH 兜底，由本地验证决定实际下载量。
+SKIP / MOVE / REMOVE 是受管理安装动作，只有 schema 2 状态记录的路径
+才能授权；SKIP 与 MOVE 还需通过本地普通文件 + 大小门禁。无旧清单
+（report=None）时全部按 PATCH 兜底，由本地验证决定实际下载量。
 """
 
 from __future__ import annotations
 
+import stat
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -56,6 +60,10 @@ class UpdatePlan:
 def build_update_plan(
     report: ManifestDiffReport | None,
     files: list[PatcherFile],
+    *,
+    managed_files: set[str] | frozenset[str] = frozenset(),
+    output_dir: str | Path | None = None,
+    allow_reuse: bool = True,
 ) -> UpdatePlan:
     """把 diff 报告映射为更新计划.
 
@@ -63,10 +71,13 @@ def build_update_plan(
         report: `diff_manifests(old, new, include_unchanged=True, detect_moves=True)`
             的报告；None 表示无旧清单。
         files: 新清单侧的目标文件列表（调用方已 filter）。
+        managed_files: schema 2 状态确认的旧清单文件集合。
+        output_dir: 安装输出根；用于 SKIP / MOVE 的普通文件与大小门禁。
+        allow_reuse: 是否允许 SKIP / MOVE；REPAIR / FORCE_FULL 应关闭。
 
     Returns:
-        更新计划。link 文件一律 SKIP；不在报告范围内的路径按 PATCH 兜底；
-        moved 配对的路径不再出现在 NEW / REMOVE 中。
+        更新计划。link 文件一律 SKIP；无所有权或磁盘门禁不通过的
+        unchanged / moved 文件退化为 PATCH；REMOVE 仅包含受管理路径。
     """
     entries: list[PlanEntry] = []
 
@@ -77,7 +88,7 @@ def build_update_plan(
         return UpdatePlan(entries=entries)
 
     moved_by_new = {moved.new_path: moved.old_path for moved in report.moved}
-    moved_old_paths = set(moved_by_new.values())
+    reused_move_sources: set[str] = set()
     status_by_path: dict[str, str] = {}
     for section in (report.unchanged, report.changed, report.added):
         for diff_entry in section:
@@ -87,19 +98,26 @@ def build_update_plan(
         if file.link:
             entries.append(PlanEntry(action=FileAction.SKIP, path=file.name, file=file))
             continue
-        if file.name in moved_by_new:
+        if not allow_reuse:
+            entries.append(PlanEntry(action=FileAction.PATCH, path=file.name, file=file))
+            continue
+        move_from = moved_by_new.get(file.name)
+        if move_from is not None and move_from in managed_files and _is_regular_size(output_dir, move_from, file.size):
+            reused_move_sources.add(move_from)
             entries.append(
                 PlanEntry(
                     action=FileAction.MOVE,
                     path=file.name,
                     file=file,
-                    move_from=moved_by_new[file.name],
+                    move_from=move_from,
                 )
             )
             continue
 
         status = status_by_path.get(file.name)
-        if status == "unchanged":
+        if move_from is not None:
+            action = FileAction.PATCH
+        elif status == "unchanged" and file.name in managed_files and _is_regular_size(output_dir, file.name, file.size):
             action = FileAction.SKIP
         elif status == "added":
             action = FileAction.NEW
@@ -110,8 +128,20 @@ def build_update_plan(
 
     target_paths = {file.name for file in files}
     for diff_entry in report.removed:
-        if diff_entry.path in moved_old_paths or diff_entry.path in target_paths:
+        if diff_entry.path in reused_move_sources or diff_entry.path in target_paths or diff_entry.path not in managed_files:
             continue
         entries.append(PlanEntry(action=FileAction.REMOVE, path=diff_entry.path))
 
     return UpdatePlan(entries=entries)
+
+
+def _is_regular_size(output_dir: str | Path | None, path: str, size: int) -> bool:
+    """判断受管理路径当前是否为声明大小的普通文件."""
+    if output_dir is None:
+        return False
+    target = Path(output_dir) / Path(path)
+    try:
+        file_stat = target.lstat()
+        return stat.S_ISREG(file_stat.st_mode) and file_stat.st_size == size
+    except OSError:
+        return False

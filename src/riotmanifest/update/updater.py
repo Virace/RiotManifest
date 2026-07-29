@@ -4,7 +4,7 @@
 
 - 目标文件不存在 → 全量下载；
 - 目标文件存在 → chunk 级固定位置验证 + 补洞；
-- 有旧清单（显式传入或 installed.json 存档）→ 文件级跳过未变化文件。
+- 有匹配的 schema 2 安装状态 → 对受管理且通过磁盘门禁的未变化文件跳过。
 
 写盘一律走 staging 临时文件 + 原子替换；部分失败不推进 installed.json。
 
@@ -22,7 +22,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Union
 
-from riotmanifest.diff.manifest_diff import ManifestInput, _ensure_manifest, diff_manifests
+from riotmanifest.diff.manifest_diff import (
+    ManifestDiffReport,
+    ManifestInput,
+    _ensure_manifest,
+    diff_manifests,
+)
 from riotmanifest.downloader.scheduler import (
     ChunkEntry,
     DownloadProgress,
@@ -33,9 +38,14 @@ from riotmanifest.downloader.scheduler import (
 )
 from riotmanifest.downloader.staging import commit_staging, discard_staging, staging_path
 from riotmanifest.manifest import PatcherManifest
-from riotmanifest.update.planner import FileAction, UpdatePlan, build_update_plan
+from riotmanifest.update.planner import (
+    FileAction,
+    UpdatePlan,
+    _is_regular_size,
+    build_update_plan,
+)
 from riotmanifest.update.result import SyncMode, UpdateResult
-from riotmanifest.update.state import ManifestArchive
+from riotmanifest.update.state import STATE_SCHEMA, ManifestArchive
 from riotmanifest.update.verify import verify_file_chunks
 
 if TYPE_CHECKING:
@@ -143,6 +153,23 @@ class _SyncPrep:
     misses: list[ChunkEntry]
     reused_bytes: int
     missing_bytes: int
+    next_files: set[str]
+
+
+@dataclass(slots=True)
+class _InstallBase:
+    """旧清单与其可信受管理文件集合；显式旧清单本身不授予所有权."""
+
+    old: PatcherManifest | None
+    files: set[str]
+
+
+@dataclass(slots=True)
+class _SyncPlan:
+    """单清单计划及成功后可写入 schema 2 的文件覆盖."""
+
+    plan: UpdatePlan
+    next_files: set[str]
 
 
 def _verify_scope(plan: UpdatePlan, mode: SyncMode) -> tuple[int, int]:
@@ -220,16 +247,30 @@ class ManifestUpdater:
         self.old_manifest = old_manifest
         self.archive = ManifestArchive(manifest.path) if archive else None
 
-    def _resolve_old_manifest(self) -> PatcherManifest | None:
-        """按 显式传入 > installed.json 存档 > 无 的顺序解析旧清单."""
-        if self.old_manifest is not None:
-            return _ensure_manifest(self.old_manifest)
-        if self.archive is None:
-            return None
-        archived = self.archive.installed_manifest_path()
-        if archived is not None:
-            return PatcherManifest(str(archived), path="")
-        return None
+    def _resolve_base(self) -> _InstallBase:
+        """解析 diff 基底，并仅在 schema 2 状态与旧清单匹配时授予所有权."""
+        state = self.archive.load_installed() if self.archive is not None else None
+        archived = self.archive.installed_manifest_path() if self.archive is not None else None
+        explicit = _ensure_manifest(self.old_manifest) if self.old_manifest is not None else None
+        old = explicit
+        files: set[str] = set()
+
+        if state is not None and archived is not None and state.schema == STATE_SCHEMA:
+            state_id = state.manifest_id.upper()
+            if explicit is not None and state_id == f"{explicit.manifest_id:016X}":
+                managed_old = explicit
+            elif state_id == f"{self.manifest.manifest_id:016X}":
+                managed_old = self.manifest
+            else:
+                managed_old = PatcherManifest(str(archived), path="")
+
+            if state_id == f"{managed_old.manifest_id:016X}":
+                old = managed_old
+                files.update(state.files)
+
+        if old is None and archived is not None:
+            old = PatcherManifest(str(archived), path="")
+        return _InstallBase(old=old, files=files)
 
     @staticmethod
     def _copy_hits(source: str, output: StrPath, hits: list[ChunkEntry]) -> None:
@@ -242,30 +283,59 @@ class ManifestUpdater:
                 dst.seek(entry.file_offset)
                 dst.write(data)
 
-    def _build_plan(self, target_files: list[PatcherFile], mode: SyncMode) -> UpdatePlan:
-        """构建更新计划；仅 AUTO 使用旧清单做文件级跳过."""
+    def _build_plan(self, target_files: list[PatcherFile], mode: SyncMode) -> _SyncPlan:
+        """构建动作计划与成功状态；仅 AUTO 复用文件，受管理清理独立于策略."""
+        base = self._resolve_base()
         report = None
-        if mode is SyncMode.AUTO:
-            old = self._resolve_old_manifest()
-            if old is not None:
-                # strict：哈希类型跨版本迁移（如 16.3 HKDF → 16.4 BLAKE3）时，
-                # loose 会跳过 chunk 比较，大小恰好相同的变更文件会被误判 unchanged。
-                report = diff_manifests(
-                    old,
-                    self.manifest,
-                    include_unchanged=True,
-                    detect_moves=True,
-                    hash_type_mismatch_mode="strict",
-                )
-        return build_update_plan(report, target_files)
+        if base.old is not None and mode is not SyncMode.VERIFY_ONLY:
+            # strict：哈希类型跨版本迁移（如 16.3 HKDF → 16.4 BLAKE3）时，
+            # loose 会跳过 chunk 比较，大小恰好相同的变更文件会被误判 unchanged。
+            report = diff_manifests(
+                base.old,
+                self.manifest,
+                include_unchanged=True,
+                detect_moves=True,
+                hash_type_mismatch_mode="strict",
+            )
 
-    async def _verify_plan(self, plan: UpdatePlan, mode: SyncMode, reporter: _VerifyReporter) -> _SyncPrep:
+        plan = build_update_plan(
+            report,
+            target_files,
+            managed_files=base.files,
+            output_dir=self.manifest.path,
+            allow_reuse=mode is SyncMode.AUTO,
+        )
+        next_files = self._carried_files(report, base.files)
+        next_files.update(file.name for file in target_files if not file.link)
+        return _SyncPlan(plan=plan, next_files=next_files)
+
+    def _carried_files(
+        self,
+        report: ManifestDiffReport | None,
+        managed_files: set[str],
+    ) -> set[str]:
+        """保留跨版本未变化、仍存在且通过普通文件/大小门禁的受管理路径."""
+        if report is None or not managed_files:
+            return set()
+
+        unchanged = {entry.path for entry in report.unchanged}
+        carried: set[str] = set()
+        for path in managed_files & unchanged:
+            file = self.manifest.files.get(path)
+            if file is None or file.link:
+                continue
+            if _is_regular_size(self.manifest.path, path, file.size):
+                carried.add(path)
+        return carried
+
+    async def _verify_plan(self, sync_plan: _SyncPlan, mode: SyncMode, reporter: _VerifyReporter) -> _SyncPrep:
         """对计划内文件做本地验证，产出 staging 与待下载 miss 列表.
 
         VERIFY_ONLY 只统计缺口与 miss 列表（供计算下载总量），
         不预分配、不写盘。
         """
         manifest = self.manifest
+        plan = sync_plan.plan
         verify_only = mode is SyncMode.VERIFY_ONLY
         actions = {entry.path: entry.action for entry in plan.entries}
         staged: list[tuple[PatcherFile, str]] = []
@@ -314,6 +384,7 @@ class ManifestUpdater:
             misses=misses,
             reused_bytes=reused_bytes,
             missing_bytes=missing_bytes,
+            next_files=sync_plan.next_files,
         )
 
     async def _finish(
@@ -339,7 +410,7 @@ class ManifestUpdater:
         await asyncio.to_thread(_finalize)
 
         removed: list[str] = []
-        if remove_deleted:
+        if remove_deleted and not failed_paths:
 
             def _cleanup() -> None:
                 for plan_entry in prep.plan.by_action(FileAction.REMOVE):
@@ -363,6 +434,7 @@ class ManifestUpdater:
                 manifest.manifest_id,
                 manifest.raw_bytes,
                 str(manifest.file),
+                prep.next_files,
             )
 
         return UpdateResult(
@@ -431,14 +503,11 @@ async def _sync_updaters(
     """
     verify_only = mode is SyncMode.VERIFY_ONLY
 
-    plans = [
-        updater._build_plan(target_files, mode)
-        for updater, target_files in zip(updaters, files_list, strict=True)
-    ]
+    sync_plans = [updater._build_plan(target_files, mode) for updater, target_files in zip(updaters, files_list, strict=True)]
     total_verify_bytes = 0
     total_verify_files = 0
-    for plan in plans:
-        plan_bytes, plan_files = _verify_scope(plan, mode)
+    for sync_plan in sync_plans:
+        plan_bytes, plan_files = _verify_scope(sync_plan.plan, mode)
         total_verify_bytes += plan_bytes
         total_verify_files += plan_files
 
@@ -446,8 +515,7 @@ async def _sync_updaters(
     await reporter.start()
     try:
         preps = [
-            await updater._verify_plan(plan, mode, reporter)
-            for updater, plan in zip(updaters, plans, strict=True)
+            await updater._verify_plan(sync_plan, mode, reporter) for updater, sync_plan in zip(updaters, sync_plans, strict=True)
         ]
     finally:
         await reporter.stop()
@@ -519,9 +587,7 @@ async def _sync_updaters(
     any_failed = False
     for updater, prep, failures in zip(updaters, preps, failures_per_updater, strict=True):
         failed_bundle_ids = {failure.bundle_id for failure in failures}
-        failed_paths = {
-            entry.file.name for entry in prep.misses if entry.chunk.bundle.bundle_id in failed_bundle_ids
-        }
+        failed_paths = {entry.file.name for entry in prep.misses if entry.chunk.bundle.bundle_id in failed_bundle_ids}
         any_failed = any_failed or bool(failed_paths)
         results.append(
             await updater._finish(

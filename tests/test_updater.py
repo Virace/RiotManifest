@@ -2,13 +2,17 @@
 
 import asyncio
 import hashlib
+import json
 import types
 from pathlib import Path
+
+import pytest
 
 from riotmanifest.core.chunk_hash import HASH_TYPE_SHA256
 from riotmanifest.downloader import DownloadScheduler, staging_path
 from riotmanifest.manifest import PatcherBundle, PatcherFile, PatcherManifest
 from riotmanifest.update import FileAction, ManifestArchive, ManifestUpdater, SyncMode
+from riotmanifest.update.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA
 
 
 def _chunk_id(data: bytes) -> int:
@@ -89,6 +93,18 @@ def _write_local(root: Path, name: str, data: bytes) -> Path:
     return target
 
 
+def _save_state(root: Path, manifest: PatcherManifest, files: list[str]) -> ManifestArchive:
+    """为 fake manifest 建立与 manifest ID 匹配的 schema 2 安装状态."""
+    archive = ManifestArchive(root)
+    archive.save(
+        manifest.manifest_id,
+        manifest.raw_bytes or b"raw-old",
+        str(manifest.file),
+        files,
+    )
+    return archive
+
+
 def test_incremental_sync_downloads_only_missing_chunks(tmp_path: Path):
     d1, d2, d3, d4, d5 = b"aaaa", b"bbbb", b"cccc", b"dddd", b"eeee"
 
@@ -104,6 +120,7 @@ def test_incremental_sync_downloads_only_missing_chunks(tmp_path: Path):
     _write_local(tmp_path, "keep.bin", d1)
     _write_local(tmp_path, "patch.bin", d1 + d2 + d3)
     _write_local(tmp_path, "gone.bin", d2)
+    _save_state(tmp_path, old, ["keep.bin", "patch.bin", "gone.bin"])
     keep_mtime = (tmp_path / "keep.bin").stat().st_mtime_ns
 
     downloaded = _install_fake_network(new, [d4, d5])
@@ -124,6 +141,9 @@ def test_incremental_sync_downloads_only_missing_chunks(tmp_path: Path):
     assert not (tmp_path / "gone.bin").exists()
     assert result.failed == []
     assert result.failures == []
+    state = ManifestArchive(tmp_path).load_installed()
+    assert state is not None
+    assert state.files == ["keep.bin", "patch.bin"]
 
 
 def test_moved_file_copied_without_download(tmp_path: Path):
@@ -134,6 +154,7 @@ def test_moved_file_copied_without_download(tmp_path: Path):
     _add_file(new, "new/name.bin", [data[:4], data[4:]])
 
     _write_local(tmp_path, "old/name.bin", data)
+    _save_state(tmp_path, old, ["old/name.bin"])
     downloaded = _install_fake_network(new, [])
 
     updater = ManifestUpdater(new, old_manifest=old)
@@ -235,6 +256,7 @@ def test_repair_mode_fixes_corruption_auto_skips(tmp_path: Path):
     _add_file(new, "a.bin", [d1, d2])
     # 本地第二个 chunk 损坏。
     _write_local(tmp_path, "a.bin", d1 + b"XXXX")
+    _save_state(tmp_path, old, ["a.bin"])
 
     downloaded = _install_fake_network(new, [d2])
     updater = ManifestUpdater(new, old_manifest=old)
@@ -250,6 +272,26 @@ def test_repair_mode_fixes_corruption_auto_skips(tmp_path: Path):
     assert result_repair.downloaded_bytes == 4
     assert result_repair.reused_bytes == 4
     assert (tmp_path / "a.bin").read_bytes() == d1 + d2
+
+
+def test_repair_mode_still_cleans_managed_removed_files(tmp_path: Path):
+    data = b"aaaa"
+    old = _make_manifest(tmp_path, manifest_id=0x1, raw=b"raw-old")
+    _add_file(old, "keep.bin", [data])
+    _add_file(old, "gone.bin", [data], bundle_id=0x2002)
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-new")
+    keep = _add_file(new, "keep.bin", [data])
+    _write_local(tmp_path, "keep.bin", data)
+    _write_local(tmp_path, "gone.bin", data)
+    _save_state(tmp_path, old, ["gone.bin", "keep.bin"])
+    _install_fake_network(new, [])
+
+    result = asyncio.run(ManifestUpdater(new, old_manifest=old).sync([keep], mode=SyncMode.REPAIR))
+
+    assert result.actions["keep.bin"] == FileAction.PATCH
+    assert result.actions["gone.bin"] == FileAction.REMOVE
+    assert result.removed == ["gone.bin"]
+    assert not (tmp_path / "gone.bin").exists()
 
 
 def test_hash_type_migration_same_size_is_patched(tmp_path: Path):
@@ -296,6 +338,8 @@ def test_successful_sync_archives_manifest(tmp_path: Path):
     state = archive.load_installed()
     assert state is not None
     assert state.manifest_id == "000000000000ABCD"
+    assert state.schema == STATE_SCHEMA
+    assert state.files == ["a.bin"]
     assert archive.installed_manifest_path().read_bytes() == b"raw-manifest"
 
 
@@ -399,3 +443,223 @@ def test_archive_disabled_skips_rman(tmp_path: Path):
     assert (tmp_path / "a.bin").read_bytes() == d1
     # 关闭存档：不创建 .rman、不写 installed.json。
     assert not (tmp_path / ".rman").exists()
+
+
+def test_repeated_partial_sync_accumulates_same_manifest_coverage(tmp_path: Path):
+    d1, d2 = b"aaaa", b"bbbb"
+    manifest = _make_manifest(tmp_path, manifest_id=0xABCD, raw=b"raw-manifest")
+    first = _add_file(manifest, "Config/description.json", [d1], bundle_id=0x1001)
+    second = _add_file(manifest, "DATA/game.wad", [d2], bundle_id=0x2002)
+    downloaded = _install_fake_network(manifest, [d1, d2])
+
+    first_result = asyncio.run(ManifestUpdater(manifest).sync([first]))
+    first_state = ManifestArchive(tmp_path).load_installed()
+    assert first_result.failed == []
+    assert first_state is not None
+    assert first_state.files == ["Config/description.json"]
+
+    second_result = asyncio.run(ManifestUpdater(manifest, old_manifest=manifest).sync([second]))
+    second_state = ManifestArchive(tmp_path).load_installed()
+
+    assert second_result.failed == []
+    assert second_result.actions["DATA/game.wad"] == FileAction.PATCH
+    assert downloaded == [_chunk_id(d1), _chunk_id(d2)]
+    assert second_state is not None
+    assert second_state.files == ["Config/description.json", "DATA/game.wad"]
+
+
+def test_managed_unchanged_missing_from_disk_is_downloaded(tmp_path: Path):
+    data = b"aaaa"
+    manifest = _make_manifest(tmp_path, manifest_id=0xABCD, raw=b"raw-manifest")
+    file = _add_file(manifest, "missing.bin", [data])
+    _save_state(tmp_path, manifest, ["missing.bin"])
+    downloaded = _install_fake_network(manifest, [data])
+
+    result = asyncio.run(ManifestUpdater(manifest, old_manifest=manifest).sync([file]))
+
+    assert result.actions["missing.bin"] == FileAction.PATCH
+    assert downloaded == [_chunk_id(data)]
+    assert (tmp_path / "missing.bin").read_bytes() == data
+
+
+def test_explicit_old_manifest_without_state_cannot_authorize_managed_actions(tmp_path: Path):
+    data = b"aaaa"
+    old = _make_manifest(tmp_path, manifest_id=0x1)
+    _add_file(old, "keep.bin", [data])
+    _add_file(old, "gone.bin", [data], bundle_id=0x2002)
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-new")
+    keep = _add_file(new, "keep.bin", [data])
+    _write_local(tmp_path, "keep.bin", data)
+    _write_local(tmp_path, "gone.bin", data)
+    _install_fake_network(new, [])
+
+    result = asyncio.run(ManifestUpdater(new, old_manifest=old).sync([keep]))
+
+    assert result.actions["keep.bin"] == FileAction.PATCH
+    assert "gone.bin" not in result.actions
+    assert result.reused_bytes == len(data)
+    assert (tmp_path / "gone.bin").is_file()
+
+
+def test_unmanaged_move_source_is_not_reused(tmp_path: Path):
+    data = b"aaaa"
+    old = _make_manifest(tmp_path, manifest_id=0x1)
+    _add_file(old, "old/name.bin", [data])
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-new")
+    moved = _add_file(new, "new/name.bin", [data])
+    _write_local(tmp_path, "old/name.bin", data)
+    downloaded = _install_fake_network(new, [data])
+
+    result = asyncio.run(ManifestUpdater(new, old_manifest=old).sync([moved]))
+
+    assert result.actions["new/name.bin"] == FileAction.PATCH
+    assert downloaded == [_chunk_id(data)]
+    assert (tmp_path / "new/name.bin").read_bytes() == data
+    assert (tmp_path / "old/name.bin").read_bytes() == data
+
+
+def test_legacy_state_is_diff_hint_then_upgrades_after_verification(tmp_path: Path):
+    data = b"aaaa"
+    manifest = _make_manifest(tmp_path, manifest_id=0x1, raw=b"raw-manifest")
+    file = _add_file(manifest, "a.bin", [data])
+    _write_local(tmp_path, "a.bin", data)
+    archive = ManifestArchive(tmp_path)
+    manifest_path = archive.root / "manifests/0000000000000001.manifest"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(b"legacy")
+    archive.installed_file.write_text(
+        json.dumps(
+            {
+                "schema": LEGACY_STATE_SCHEMA,
+                "manifest_id": "0000000000000001",
+                "manifest_file": "manifests/0000000000000001.manifest",
+                "source": "legacy",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        "utf-8",
+    )
+    _install_fake_network(manifest, [])
+
+    result = asyncio.run(ManifestUpdater(manifest, old_manifest=manifest).sync([file]))
+    state = archive.load_installed()
+
+    assert result.actions["a.bin"] == FileAction.PATCH
+    assert result.reused_bytes == len(data)
+    assert state is not None
+    assert state.schema == STATE_SCHEMA
+    assert state.files == ["a.bin"]
+
+
+def test_cross_version_carries_only_valid_unchanged_coverage(tmp_path: Path):
+    d1, old_data, new_data = b"aaaa", b"bbbb", b"cccc"
+    old = _make_manifest(tmp_path, manifest_id=0x1, raw=b"raw-old")
+    _add_file(old, "keep.bin", [d1])
+    _add_file(old, "change.bin", [old_data], bundle_id=0x2002)
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-new")
+    _add_file(new, "keep.bin", [d1])
+    changed = _add_file(new, "change.bin", [new_data], bundle_id=0x3003)
+    _write_local(tmp_path, "keep.bin", d1)
+    _write_local(tmp_path, "change.bin", old_data)
+    _save_state(tmp_path, old, ["keep.bin", "change.bin"])
+    _install_fake_network(new, [new_data])
+
+    result = asyncio.run(ManifestUpdater(new, old_manifest=old).sync([changed]))
+    state = ManifestArchive(tmp_path).load_installed()
+
+    assert result.failed == []
+    assert state is not None
+    assert state.files == ["change.bin", "keep.bin"]
+
+
+def test_symlink_is_not_carried_as_managed_coverage(tmp_path: Path):
+    keep_data, new_data = b"keep", b"new!"
+    manifest = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-current")
+    _add_file(manifest, "keep.bin", [keep_data])
+    selected = _add_file(manifest, "new.bin", [new_data], bundle_id=0x2002)
+    real = _write_local(tmp_path, "real.bin", keep_data)
+    try:
+        (tmp_path / "keep.bin").symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"当前环境不允许创建符号链接: {exc}")
+    _save_state(tmp_path, manifest, ["keep.bin"])
+    _install_fake_network(manifest, [new_data])
+
+    result = asyncio.run(ManifestUpdater(manifest).sync([selected]))
+    state = ManifestArchive(tmp_path).load_installed()
+
+    assert result.failed == []
+    assert state is not None
+    assert state.files == ["new.bin"]
+
+
+def test_matching_managed_state_takes_precedence_over_stale_explicit_hint(tmp_path: Path):
+    keep_data, new_data = b"keep", b"new!"
+    stale = _make_manifest(tmp_path, manifest_id=0x1)
+    manifest = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-current")
+    _add_file(manifest, "keep.bin", [keep_data])
+    selected = _add_file(manifest, "new.bin", [new_data], bundle_id=0x2002)
+    _write_local(tmp_path, "keep.bin", keep_data)
+    _save_state(tmp_path, manifest, ["keep.bin"])
+    _install_fake_network(manifest, [new_data])
+
+    result = asyncio.run(ManifestUpdater(manifest, old_manifest=stale).sync([selected]))
+    state = ManifestArchive(tmp_path).load_installed()
+
+    assert result.failed == []
+    assert state is not None
+    assert state.files == ["keep.bin", "new.bin"]
+
+
+def test_failed_batch_does_not_cleanup_or_advance_state(tmp_path: Path):
+    old_data, ok_data, bad_data = b"old!", b"good", b"bad!"
+    old = _make_manifest(tmp_path, manifest_id=0x1, raw=b"raw-old")
+    _add_file(old, "gone.bin", [old_data])
+    new = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-new")
+    ok = _add_file(new, "ok.bin", [ok_data], bundle_id=0x1001)
+    bad = _add_file(new, "bad.bin", [bad_data], bundle_id=0x2002)
+    _write_local(tmp_path, "gone.bin", old_data)
+    archive = _save_state(tmp_path, old, ["gone.bin"])
+    before = archive.installed_file.read_text("utf-8")
+    _install_fake_network(new, [ok_data, bad_data], fail_bundles={0x2002})
+
+    result = asyncio.run(ManifestUpdater(new, old_manifest=old).sync([ok, bad]))
+
+    assert result.failed == ["bad.bin"]
+    assert (tmp_path / "ok.bin").read_bytes() == ok_data
+    assert (tmp_path / "gone.bin").read_bytes() == old_data
+    assert archive.installed_file.read_text("utf-8") == before
+
+
+def test_archive_false_ignores_and_preserves_existing_state(tmp_path: Path):
+    data = b"aaaa"
+    old = _make_manifest(tmp_path, manifest_id=0x1, raw=b"raw-old")
+    file = _add_file(old, "a.bin", [data])
+    _write_local(tmp_path, "a.bin", data)
+    archive = _save_state(tmp_path, old, ["a.bin"])
+    before = archive.installed_file.read_text("utf-8")
+    _install_fake_network(old, [])
+
+    result = asyncio.run(ManifestUpdater(old, old_manifest=old, archive=False).sync([file]))
+
+    assert result.actions["a.bin"] == FileAction.PATCH
+    assert result.reused_bytes == len(data)
+    assert archive.installed_file.read_text("utf-8") == before
+
+
+def test_raw_downloader_preserves_existing_installed_state(tmp_path: Path):
+    old_data, new_data = b"old!", b"new!"
+    old = _make_manifest(tmp_path, manifest_id=0x1, raw=b"raw-old")
+    _add_file(old, "managed.bin", [old_data])
+    archive = _save_state(tmp_path, old, ["managed.bin"])
+    before = archive.installed_file.read_text("utf-8")
+
+    manifest = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-new")
+    file = _add_file(manifest, "standalone.bin", [new_data])
+    _install_fake_network(manifest, [new_data])
+
+    result = asyncio.run(manifest.download_files_concurrently([file]))
+
+    assert result == (True,)
+    assert (tmp_path / "standalone.bin").read_bytes() == new_data
+    assert archive.installed_file.read_text("utf-8") == before
