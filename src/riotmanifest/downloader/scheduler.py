@@ -328,6 +328,26 @@ class DownloadScheduler:
             outputs.append(payload[chunk_range.start : chunk_range.end + 1])
         return outputs
 
+    @classmethod
+    def validate_content_range(
+        cls,
+        content_range: str,
+        chunk_range: ChunkRange,
+        bundle_id: int,
+    ) -> None:
+        """校验单段 206 响应是否精确对应请求区间."""
+        match = cls.CONTENT_RANGE_REGEX.match(content_range)
+        if match:
+            start = int(match.group(1))
+            end = int(match.group(2))
+            if start == chunk_range.start and end == chunk_range.end:
+                return
+
+        raise DownloadError(
+            f"Content-Range异常: bundle_id={bundle_id}, actual={content_range!r}, "
+            f"expected=bytes {chunk_range.start}-{chunk_range.end}/*"
+        )
+
     async def parse_multipart_response(
         self,
         response: aiohttp.ClientResponse,
@@ -458,10 +478,27 @@ class DownloadScheduler:
                     else:
                         payload = await response.read()
                         if len(ranges) != 1:
-                            raise DownloadError(
-                                f"多段range未返回multipart: bundle_id={bundle_id}, ranges={len(ranges)}"
+                            # 部分 CDN 会把 multi-range 降级为单段 206；逐段重发，
+                            # 禁止把当前响应按顺序错误映射到多个 range。
+                            logger.debug(
+                                "multi-range返回单段206，回退逐段请求: bundle_id={:016X}, ranges={}",
+                                bundle_id,
+                                len(ranges),
                             )
-                        range_payloads = [payload]
+                            range_payloads = []
+                            for chunk_range in ranges:
+                                range_payloads.extend(
+                                    await self.fetch_ranges_data(
+                                        session,
+                                        bundle_id,
+                                        [chunk_range],
+                                        attempt=attempt,
+                                    )
+                                )
+                        else:
+                            content_range = response.headers.get(aiohttp.hdrs.CONTENT_RANGE, "").strip()
+                            self.validate_content_range(content_range, ranges[0], bundle_id)
+                            range_payloads = [payload]
 
                 if len(range_payloads) != len(ranges):
                     raise DownloadError(

@@ -50,13 +50,17 @@ class _FakeResponseContext:
 
 
 class _FakeSession:
-    def __init__(self, response: _FakeResponse):
-        self._response = response
+    def __init__(self, response: _FakeResponse | list[_FakeResponse]):
+        self._responses = response if isinstance(response, list) else [response]
         self.last_request = None
+        self.requests = []
 
     def get(self, url, headers=None, timeout=None):
         self.last_request = (url, headers, timeout)
-        return _FakeResponseContext(self._response)
+        self.requests.append(self.last_request)
+        if not self._responses:
+            raise AssertionError("未配置更多 HTTP 响应")
+        return _FakeResponseContext(self._responses.pop(0))
 
 
 def test_parse_rman_dispatches_parse_body():
@@ -331,7 +335,14 @@ def test_fetch_ranges_data_status_200(monkeypatch):
 
 def test_fetch_ranges_data_status_206_single_range_plain():
     manifest = _make_manifest_stub()
-    response = _FakeResponse(status=206, headers={aiohttp.hdrs.CONTENT_TYPE: "application/octet-stream"}, payload=b"ABC")
+    response = _FakeResponse(
+        status=206,
+        headers={
+            aiohttp.hdrs.CONTENT_TYPE: "application/octet-stream",
+            aiohttp.hdrs.CONTENT_RANGE: "bytes 0-2/3",
+        },
+        payload=b"ABC",
+    )
     session = _FakeSession(response)
     ranges = [ChunkRange(start=0, end=2, tasks=[])]
 
@@ -339,14 +350,63 @@ def test_fetch_ranges_data_status_206_single_range_plain():
     assert result == [b"ABC"]
 
 
-def test_fetch_ranges_data_status_206_multi_range_plain_raises():
+def test_fetch_ranges_data_status_206_multi_range_plain_falls_back():
     manifest = _make_manifest_stub()
-    response = _FakeResponse(status=206, headers={aiohttp.hdrs.CONTENT_TYPE: "application/octet-stream"}, payload=b"ABC")
-    session = _FakeSession(response)
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                status=206,
+                headers={
+                    aiohttp.hdrs.CONTENT_TYPE: "application/octet-stream",
+                    aiohttp.hdrs.CONTENT_RANGE: "bytes 99-99/100",
+                },
+                payload=b"X",
+            ),
+            _FakeResponse(
+                status=206,
+                headers={
+                    aiohttp.hdrs.CONTENT_TYPE: "application/octet-stream",
+                    aiohttp.hdrs.CONTENT_RANGE: "bytes 0-0/2",
+                },
+                payload=b"A",
+            ),
+            _FakeResponse(
+                status=206,
+                headers={
+                    aiohttp.hdrs.CONTENT_TYPE: "application/octet-stream",
+                    aiohttp.hdrs.CONTENT_RANGE: "bytes 1-1/2",
+                },
+                payload=b"B",
+            ),
+        ]
+    )
     ranges = [
         ChunkRange(start=0, end=0, tasks=[]),
         ChunkRange(start=1, end=1, tasks=[]),
     ]
 
-    with pytest.raises(DownloadError, match="多段range未返回multipart"):
+    result = asyncio.run(manifest.downloader.fetch_ranges_data(session, 0x1234, ranges))
+
+    assert result == [b"A", b"B"]
+    assert [request[1]["Range"] for request in session.requests] == [
+        "bytes=0-0,1-1",
+        "bytes=0-0",
+        "bytes=1-1",
+    ]
+
+
+def test_fetch_ranges_data_status_206_single_range_validates_content_range():
+    manifest = _make_manifest_stub()
+    response = _FakeResponse(
+        status=206,
+        headers={
+            aiohttp.hdrs.CONTENT_TYPE: "application/octet-stream",
+            aiohttp.hdrs.CONTENT_RANGE: "bytes 1-3/4",
+        },
+        payload=b"ABC",
+    )
+    session = _FakeSession(response)
+    ranges = [ChunkRange(start=0, end=2, tasks=[])]
+
+    with pytest.raises(DownloadError, match="Content-Range"):
         asyncio.run(manifest.downloader.fetch_ranges_data(session, 0x1234, ranges))
