@@ -7,13 +7,18 @@ from pathlib import Path
 import pytest
 
 from riotmanifest.manifest import PatcherManifest
-from riotmanifest.update.state import STATE_SCHEMA, ManifestArchive
+from riotmanifest.update.state import LEGACY_STATE_SCHEMA, STATE_SCHEMA, ManifestArchive
 
 
 def test_save_then_load_roundtrip(tmp_path: Path):
     archive = ManifestArchive(tmp_path)
 
-    archive.save(0x037EC59D5BD7C5D3, b"raw-manifest-bytes", "https://example.invalid/a.manifest")
+    archive.save(
+        0x037EC59D5BD7C5D3,
+        b"raw-manifest-bytes",
+        "https://example.invalid/a.manifest",
+        ["DATA\\b.bin", "Config/a.json", "DATA/b.bin"],
+    )
 
     state = archive.load_installed()
     assert state is not None
@@ -22,6 +27,7 @@ def test_save_then_load_roundtrip(tmp_path: Path):
     assert state.manifest_file == "manifests/037EC59D5BD7C5D3.manifest"
     assert state.source == "https://example.invalid/a.manifest"
     assert state.updated_at
+    assert state.files == ["Config/a.json", "DATA/b.bin"]
 
     manifest_path = archive.installed_manifest_path()
     assert manifest_path is not None
@@ -46,6 +52,112 @@ def test_load_unknown_schema_returns_none(tmp_path: Path):
         "utf-8",
     )
     assert archive.load_installed() is None
+
+
+def test_load_legacy_schema_keeps_manifest_pointer_without_coverage(tmp_path: Path):
+    archive = ManifestArchive(tmp_path)
+    archive.installed_file.parent.mkdir(parents=True, exist_ok=True)
+    archive.installed_file.write_text(
+        json.dumps(
+            {
+                "schema": LEGACY_STATE_SCHEMA,
+                "manifest_id": "0000000000000001",
+                "manifest_file": "manifests/0000000000000001.manifest",
+                "source": "legacy",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+        ),
+        "utf-8",
+    )
+    manifest_path = archive.root / "manifests/0000000000000001.manifest"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(b"legacy")
+
+    state = archive.load_installed()
+
+    assert state is not None
+    assert state.schema == LEGACY_STATE_SCHEMA
+    assert state.files == []
+    assert archive.installed_manifest_path() == manifest_path
+
+
+def test_load_schema_two_with_invalid_files_returns_none(tmp_path: Path):
+    archive = ManifestArchive(tmp_path)
+    archive.installed_file.parent.mkdir(parents=True, exist_ok=True)
+    archive.installed_file.write_text(
+        json.dumps(
+            {
+                "schema": STATE_SCHEMA,
+                "manifest_id": "0000000000000001",
+                "manifest_file": "manifests/0000000000000001.manifest",
+                "files": ["../outside.bin"],
+            }
+        ),
+        "utf-8",
+    )
+
+    assert archive.load_installed() is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/absolute.bin",
+        "trailing/",
+        "double//segment.bin",
+        "./dot.bin",
+        "parent/../escape.bin",
+        "bad:segment/file.bin",
+        "dir/bad:segment.bin",
+    ],
+)
+def test_state_paths_reject_malformed_segments(tmp_path: Path, path: str):
+    archive = ManifestArchive(tmp_path)
+
+    with pytest.raises(ValueError, match="manifest 相对路径"):
+        archive.save(0x1, b"v1", "src", [path])
+
+
+@pytest.mark.parametrize("manifest_file", ["/absolute.manifest", "manifests//bad.manifest", "bad:id.manifest"])
+def test_load_rejects_invalid_manifest_file(tmp_path: Path, manifest_file: str):
+    archive = ManifestArchive(tmp_path)
+    archive.installed_file.parent.mkdir(parents=True, exist_ok=True)
+    archive.installed_file.write_text(
+        json.dumps(
+            {
+                "schema": STATE_SCHEMA,
+                "manifest_id": "0000000000000001",
+                "manifest_file": manifest_file,
+                "files": [],
+            }
+        ),
+        "utf-8",
+    )
+
+    assert archive.load_installed() is None
+
+
+@pytest.mark.parametrize("files", [None, pytest.param("missing", id="missing-key")])
+def test_load_schema_two_requires_files_array(tmp_path: Path, files):
+    archive = ManifestArchive(tmp_path)
+    archive.installed_file.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": STATE_SCHEMA,
+        "manifest_id": "0000000000000001",
+        "manifest_file": "manifests/0000000000000001.manifest",
+    }
+    if files != "missing":
+        payload["files"] = files
+    archive.installed_file.write_text(json.dumps(payload), "utf-8")
+
+    assert archive.load_installed() is None
+
+
+def test_save_rejects_string_instead_of_treating_it_as_path_list(tmp_path: Path):
+    archive = ManifestArchive(tmp_path)
+
+    with pytest.raises(ValueError, match="manifest 相对路径"):
+        archive.save(0x1, b"v1", "src", "a.bin")
 
 
 def test_save_keeps_only_current_and_previous(tmp_path: Path):

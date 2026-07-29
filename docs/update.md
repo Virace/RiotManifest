@@ -13,13 +13,20 @@
 
 ## 核心语义
 
-下载、修复、更新是同一条管线，不需要单独的"更新开关"：
+`PatcherManifest` 的下载接口与 `ManifestUpdater` 的受管理安装是两种意图：
+
+- `PatcherManifest.download_files_concurrently()` / `PatcherFile.download_file()`：
+  单独下载，不读取或写入安装状态，也没有移动、删除权限。
+- `ManifestUpdater`：受管理安装，默认维护 schema 2 状态并据此执行增量动作。
+
+受管理安装的文件处理仍复用同一条验证/下载管线：
 
 | 本地状态 | 行为 |
 |---|---|
 | 目标文件不存在 | 全量下载 |
 | 目标文件存在 | 按新清单 chunk 布局逐块验证，命中保留、miss 补洞下载 |
-| 有旧清单（显式传入或本地存档） | 额外做文件级跳过：路径与 chunk 序列均未变的文件整个跳过 |
+| 有旧清单，但文件不在 schema 2 覆盖中 | 旧清单只作 diff 提示；目标仍逐 chunk 验证 |
+| 文件未变化、在 schema 2 覆盖中，且磁盘类型/大小正确 | 整个文件快速跳过 |
 
 验证是"固定位置"的：按新清单里每个 chunk 的偏移在本地文件对应位置读取并哈希比对，
 不做滑动窗口搜索。chunk 位置未变即命中，通常能覆盖版本间的绝大多数数据。
@@ -48,8 +55,9 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-首次运行没有旧清单时自动退化为"全量下载 + 逐文件验证"；
-成功后清单会自动存档，下一次运行即自动进入增量模式。
+首次运行没有可信覆盖时自动退化为"逐文件验证 + 缺口下载"；
+成功后清单和本次确认的文件集合会写入 schema 2。后续对同一清单同步
+其他文件时会累积覆盖，不会把一次部分同步误记为完整安装。
 
 ## `ManifestUpdater`
 
@@ -57,23 +65,26 @@ if __name__ == "__main__":
 
 - `manifest`：目标（新）清单，其 `path` 即输出目录。
 - `old_manifest`：旧清单，支持路径 / URL / `PatcherManifest` 实例。
-  不传时自动从输出目录的 `installed.json` 存档解析。
+  不传时自动从输出目录的 `installed.json` 存档解析。显式旧清单本身
+  只是 diff 提示，不能授权跳过、移动或删除；这些动作还需要匹配的
+  schema 2 `files` 所有权。
 - `archive`（keyword-only，默认 `True`）：是否在输出目录维护 `.rman/` 存档
-  与 installed.json。`False` 时不创建存档、不推进版本指针，旧清单只认显式
-  传入——适合输出目录不归本库管辖的场景（如玩家的游戏目录，重装游戏时
-  会被清空，使用侧自有增量基底时存档只是陌生残留）。
+  与 installed.json。`False` 时完全不读取或写入安装状态；旧清单只认显式
+  传入，且不授予跳过、移动或删除权限。适合输出目录不归本库管辖的场景。
 
 ### `sync()`
 
 - `files`：目标文件列表（如 `filter_files` 的结果）；`None` 表示全部文件。
 - `mode`：见下方 `SyncMode`。
 - `remove_deleted`：是否删除旧清单声明、新清单不含的文件（含移动后的旧路径），默认 `True`。
-  只会删除旧清单声明过的路径，不碰目录里的陌生文件。
+  只会删除 schema 2 `files` 明确管理、且新清单不再需要的路径，不碰目录里的
+  陌生文件。`False` 会保留旧文件，但新状态不再声明其所有权。
 - `concurrency_limit` / `progress_callback` / `progress_interval_seconds`：透传给下载调度器。
 
 返回 `UpdateResult`。部分文件失败不抛异常：失败文件记入 `failed`，
 失败原因（bundle_id + 原始异常）记入 `failures`，
-其旧文件保持原样，且本次不更新 `installed.json`（版本指针只在整批成功后推进）。
+其旧文件保持原样，本次不执行清理，也不更新 `installed.json`
+（版本指针只在整批成功后推进）。
 
 ## 多清单联合同步 `sync_many`
 
@@ -130,7 +141,8 @@ results = await sync_many(
 ## `SyncMode`
 
 - `AUTO`（默认）：上表语义。注意：被文件级跳过的文件不做本地验证
-  （rman `--update` 同款权衡），怀疑本地损坏时用 `REPAIR`。
+  内容，只检查 schema 2 所有权、普通文件类型和大小。它能发现缺失/截断，
+  但不能发现同大小损坏；怀疑内容损坏时用 `REPAIR`。
 - `REPAIR`：不做文件级跳过，对全部目标文件逐 chunk 验证并补洞（修复）。
 - `VERIFY_ONLY`：不做文件级跳过，只验证并报告缺失量，不写盘、不下载、不存档（dry-run）。
 - `FORCE_FULL`：跳过一切验证，强制全量重下。
@@ -178,8 +190,28 @@ results = await sync_many(
 
 - 所有写入先落 staging，文件全部 chunk 就绪后原子替换到目标路径；
   中断或失败时旧文件保持完整。峰值磁盘占用约多出"单个在写文件"的大小。
-- `installed.json` 的 schema 与 Go 项目 RiotManifestGo 共享，
-  两个工具指向同一个游戏目录时状态可互认。
+- `installed.json` 的 schema 2 与 Go 项目 RiotManifestGo 共享，
+  两个工具指向同一个安装根时状态可互认。`files` 是排序、去重、统一使用
+  `/` 的 manifest 相对路径，表示当前存档清单下已确认的受管理文件：
+
+  ```json
+  {
+    "schema": 2,
+    "manifest_id": "037EC59D5BD7C5D3",
+    "manifest_file": "manifests/037EC59D5BD7C5D3.manifest",
+    "source": "https://example.invalid/releases/037EC59D5BD7C5D3.manifest",
+    "updated_at": "2026-07-29T12:00:00Z",
+    "files": [
+      "Config/description.json",
+      "DATA/FINAL/Maps/Shipping.wad.client"
+    ]
+  }
+  ```
+
+- schema 1 没有文件覆盖证据：仍可读取其旧清单作 diff 提示，但不会授权
+  `SKIP`、`MOVE` 或 `REMOVE`；下一次成功的受管理同步会写成 schema 2。
+- 跨版本时只继承内容未变化、仍在新清单中、且通过类型/大小门禁的受管理文件；
+  changed 但本轮未选择的旧文件会留在磁盘，却不会被新状态误认为已安装。
 
 ## 输出根语义（多清单场景必读）
 
@@ -204,15 +236,16 @@ bundle作业完成: 00000000075BCA5C, bytes=4194304, elapsed=1.20s, speed=349525
 ## 与 diff 模块的关系
 
 `ManifestUpdater` 内部直接复用 `diff_manifests` 的文件级报告
-（unchanged/changed/added/moved/removed → 跳过/补丁/新下/改名/删除）。
+（unchanged/changed/added/moved/removed → 跳过/补丁/新下/改名/删除），
+但 diff 只说明清单变化，schema 2 所有权和磁盘门禁才决定是否允许受管理动作。
 如果你同时需要"资源侧更新日志"，可以自己再调一次 `diff_manifests`
 并使用其 JSON 导出，两者结论一致。
 
 ## 行为变更说明（相对 2.x 下载语义）
 
 - `download_files_concurrently` 不再按"文件大小相同"跳过已存在文件，
-  语义变为"给什么下什么"；跳过决策统一由 `ManifestUpdater` 承担。
-  需要增量语义时请改用 `updater.sync()`。
+  语义为无状态的"给什么下什么"，不接触 `.rman`；需要受管理增量语义时
+  使用 `updater.sync()`。
 - 下载写盘改为 staging + 原子替换：中断不再损坏已有文件。
 
 ## 致谢
