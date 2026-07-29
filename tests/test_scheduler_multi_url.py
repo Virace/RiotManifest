@@ -48,10 +48,10 @@ def _make_single_chunk_file(manifest: PatcherManifest, *, bundle_id: int, size: 
 
 
 class _FakeResponse:
-    def __init__(self, status: int, body: bytes):
+    def __init__(self, status: int, body: bytes, headers: dict | None = None):
         self.status = status
         self._body = body
-        self.headers = {}
+        self.headers = headers or {}
 
     async def read(self) -> bytes:
         return self._body
@@ -94,7 +94,7 @@ def test_jobs_spread_deterministically_across_urls(tmp_path: Path):
     even_job = manifest.downloader.build_bundle_jobs([_make_single_chunk_file(manifest, bundle_id=0x2)])[0]
     odd_job = manifest.downloader.build_bundle_jobs([_make_single_chunk_file(manifest, bundle_id=0x3)])[0]
 
-    session = _FakeSession([_FakeResponse(206, b"x" * 8)])
+    session = _FakeSession([_FakeResponse(206, b"x" * 8, {"Content-Range": "bytes 0-7/8"})])
     asyncio.run(manifest.downloader.fetch_ranges_data(session, even_job.bundle_id, even_job.ranges))
     asyncio.run(manifest.downloader.fetch_ranges_data(session, odd_job.bundle_id, odd_job.ranges))
 
@@ -136,7 +136,7 @@ def test_legacy_manifest_stub_without_bundle_urls_still_works(tmp_path: Path):
     file = _make_single_chunk_file(manifest, bundle_id=0x7)
     job = manifest.downloader.build_bundle_jobs([file])[0]
 
-    session = _FakeSession([_FakeResponse(206, b"x" * 8)])
+    session = _FakeSession([_FakeResponse(206, b"x" * 8, {"Content-Range": "bytes 0-7/8"})])
     payloads = asyncio.run(manifest.downloader.fetch_ranges_data(session, job.bundle_id, job.ranges))
 
     assert payloads == [b"x" * 8]

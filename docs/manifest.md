@@ -134,6 +134,8 @@ PatcherManifest(
 
 - 小间隔 chunk 会合并为同一次 range 请求
 - 单个请求最多合并一定数量的 ranges
+- multi-range 收到非 multipart 的单段 `206` 时，会自动逐段重发并校验
+  `Content-Range`，不会把单段响应映射到多个 range
 - 显式启用整包阈值后，需下载比例足够高的 bundle 直接整包 GET
 - 超时会根据作业大小与速度动态调整
 
@@ -328,7 +330,7 @@ logger.enable("riotmanifest")
 | ERROR | 重试耗尽后的最终失败，结果已受损 | O(失败 bundle 数)，正常为 0 |
 | WARNING | 已触发自动重试的单次尝试失败 | 正常为 0，网络抖动时 O(重试次数) |
 | INFO | 批次级里程碑（开始 / 结束摘要） | 每批固定 2 条 |
-| DEBUG | 作业级细节与降级路径（逐 bundle 完成、200 完整体回退、multipart 兜底映射） | O(bundle 作业数) |
+| DEBUG | 作业级细节与降级路径（逐 bundle 完成、200 完整体回退、multi-range 逐段回退、multipart 兜底映射） | O(bundle 作业数) |
 
 失败原因的结构化获取不依赖日志：批量下载捕获 `DownloadBatchError.failures`，
 增量更新读 `UpdateResult.failures`，

@@ -198,7 +198,13 @@ def test_fetch_range_mode_still_sends_range_header(tmp_path: Path):
 
     job = jobs[0]
     assert job.full_bundle is False
-    session = _FakeSession(_FakeResponse(206, b"x" * 100))
+    session = _FakeSession(
+        _FakeResponse(
+            206,
+            b"x" * 100,
+            {"Content-Range": "bytes 0-99/1000"},
+        )
+    )
 
     payloads = asyncio.run(manifest.downloader.fetch_ranges_data(session, job.bundle_id, job.ranges))
 
