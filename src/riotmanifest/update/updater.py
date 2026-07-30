@@ -395,17 +395,22 @@ class ManifestUpdater:
         failed_paths: set[str],
         failures: list[BundleJobFailure],
     ) -> UpdateResult:
-        """收尾：staging 提交/丢弃、清理删除项、推进存档并构建结果."""
+        """收尾：提交 staging、清理删除项、推进存档并构建结果."""
         manifest = self.manifest
         downloaded_bytes = sum(miss.chunk.target_size for miss in prep.misses if miss.file.name not in failed_paths)
         missing_bytes = sum(miss.chunk.target_size for miss in prep.misses if miss.file.name in failed_paths)
+        committed: list[str] = []
 
         def _finalize() -> None:
+            seen: set[str] = set()
             for file, output in prep.staged:
                 if file.name in failed_paths:
                     discard_staging(output)
-                else:
-                    commit_staging(output)
+                    continue
+                commit_staging(output)
+                if file.name not in seen:
+                    seen.add(file.name)
+                    committed.append(file.name)
 
         await asyncio.to_thread(_finalize)
 
@@ -446,6 +451,7 @@ class ManifestUpdater:
             failed=sorted(failed_paths),
             failures=failures,
             verify_only=False,
+            committed_files=committed,
         )
 
     async def sync(

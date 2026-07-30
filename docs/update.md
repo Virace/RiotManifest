@@ -178,6 +178,14 @@ results = await sync_many(
       print(f"  底层原因: {failure.error.__cause__!r}")
   ```
 
+- `verify_only`：本次是否为 `VERIFY_ONLY` 运行。
+- `committed_files`：经 staging 成功提交到目标路径的清单文件名列表。
+  只统计本轮真实写盘的文件：验证完全命中的 PATCH、REMOVE 和下载失败文件不计入；
+  MOVE、全新下载及纯本地 chunk 命中重建只要最终提交成功就计入。同一路径最多
+  出现一次，顺序与计划内文件顺序一致；`VERIFY_ONLY` 恒为空列表。
+  `actions` 仍是计划口径；需要统计实际更新文件时应使用本字段。
+  `sync_many` 返回的每个结果只包含所属 target 的提交路径。
+
 ## 本地状态与磁盘布局
 
 更新依赖两类本地信息，均不使用数据库：
