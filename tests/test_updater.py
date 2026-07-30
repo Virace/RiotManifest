@@ -141,6 +141,7 @@ def test_incremental_sync_downloads_only_missing_chunks(tmp_path: Path):
     assert not (tmp_path / "gone.bin").exists()
     assert result.failed == []
     assert result.failures == []
+    assert result.committed_files == ["patch.bin"]
     state = ManifestArchive(tmp_path).load_installed()
     assert state is not None
     assert state.files == ["keep.bin", "patch.bin"]
@@ -166,6 +167,7 @@ def test_moved_file_copied_without_download(tmp_path: Path):
     assert result.reused_bytes == 8
     # 移动源在 remove_deleted=True 时清理。
     assert not (tmp_path / "old/name.bin").exists()
+    assert result.committed_files == ["new/name.bin"]
 
 
 def test_verify_only_reports_without_writing(tmp_path: Path):
@@ -187,6 +189,7 @@ def test_verify_only_reports_without_writing(tmp_path: Path):
     assert (tmp_path / "a.bin").read_bytes() == d1 + b"XXXX"
     assert not list(tmp_path.glob("**/*.rman-tmp"))
     assert not (tmp_path / ".rman").exists()
+    assert result.committed_files == []
 
 
 def test_force_full_downloads_everything(tmp_path: Path):
@@ -203,6 +206,7 @@ def test_force_full_downloads_everything(tmp_path: Path):
     assert sorted(downloaded) == sorted([_chunk_id(d1), _chunk_id(d2)])
     assert result.downloaded_bytes == 8
     assert result.reused_bytes == 0
+    assert result.committed_files == ["a.bin"]
 
 
 def test_no_old_manifest_verifies_locally(tmp_path: Path):
@@ -220,6 +224,7 @@ def test_no_old_manifest_verifies_locally(tmp_path: Path):
     assert result.downloaded_bytes == 0
     assert result.actions["a.bin"] == FileAction.PATCH
     assert result.reused_bytes == 8
+    assert result.committed_files == []
 
 
 def test_partial_failure_keeps_old_file_and_state(tmp_path: Path):
@@ -243,6 +248,7 @@ def test_partial_failure_keeps_old_file_and_state(tmp_path: Path):
     # 失败文件旧内容保留、无 staging 残留。
     assert (tmp_path / "bad.bin").read_bytes() == b"old!"
     assert not list(tmp_path.glob("**/*.rman-tmp"))
+    assert result.committed_files == ["ok.bin"]
     # 部分失败不推进 installed.json。
     assert ManifestArchive(tmp_path).load_installed() is None
 
@@ -265,6 +271,7 @@ def test_repair_mode_fixes_corruption_auto_skips(tmp_path: Path):
     assert result_auto.actions["a.bin"] == FileAction.SKIP
     assert (tmp_path / "a.bin").read_bytes() == d1 + b"XXXX"
     assert downloaded == []
+    assert result_auto.committed_files == []
 
     result_repair = asyncio.run(updater.sync(mode=SyncMode.REPAIR))
     assert result_repair.actions["a.bin"] == FileAction.PATCH
@@ -272,6 +279,7 @@ def test_repair_mode_fixes_corruption_auto_skips(tmp_path: Path):
     assert result_repair.downloaded_bytes == 4
     assert result_repair.reused_bytes == 4
     assert (tmp_path / "a.bin").read_bytes() == d1 + d2
+    assert result_repair.committed_files == ["a.bin"]
 
 
 def test_repair_mode_still_cleans_managed_removed_files(tmp_path: Path):
@@ -663,3 +671,89 @@ def test_raw_downloader_preserves_existing_installed_state(tmp_path: Path):
     assert result == (True,)
     assert (tmp_path / "standalone.bin").read_bytes() == new_data
     assert archive.installed_file.read_text("utf-8") == before
+
+
+def test_full_verify_all_complete_commits_nothing(tmp_path: Path):
+    """无所有权状态的全量校验完全命中时不产生提交."""
+    data_by_name = {
+        "a.bin": b"aaaa",
+        "b.bin": b"bbbb",
+        "c.bin": b"cccc",
+    }
+    manifest = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    for name, data in data_by_name.items():
+        _add_file(manifest, name, [data])
+        _write_local(tmp_path, name, data)
+    downloaded = _install_fake_network(manifest, [])
+
+    result = asyncio.run(ManifestUpdater(manifest, archive=False).sync())
+
+    assert result.committed_files == []
+    assert downloaded == []
+    assert result.downloaded_bytes == 0
+    assert all(action is FileAction.PATCH for action in result.actions.values())
+
+
+def test_committed_files_lists_only_rebuilt_files(tmp_path: Path):
+    """只列出实际重建文件，并保持目标文件顺序."""
+    complete_a, hit, missing, complete_b, damaged, absent = (
+        b"aaaa",
+        b"bbbb",
+        b"cccc",
+        b"dddd",
+        b"eeee",
+        b"ffff",
+    )
+    manifest = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    _add_file(manifest, "complete-a.bin", [complete_a])
+    _add_file(manifest, "partial.bin", [hit, missing])
+    _add_file(manifest, "complete-b.bin", [complete_b])
+    _add_file(manifest, "damaged.bin", [damaged])
+    _add_file(manifest, "absent.bin", [absent])
+    _write_local(tmp_path, "complete-a.bin", complete_a)
+    _write_local(tmp_path, "partial.bin", hit + b"XXXX")
+    _write_local(tmp_path, "complete-b.bin", complete_b)
+    _write_local(tmp_path, "damaged.bin", b"YYYY")
+    _install_fake_network(manifest, [missing, damaged, absent])
+
+    result = asyncio.run(ManifestUpdater(manifest, archive=False).sync())
+
+    assert result.committed_files == ["partial.bin", "damaged.bin", "absent.bin"]
+    assert len(result.committed_files) == len(set(result.committed_files))
+    assert result.downloaded_bytes == 12
+    assert result.reused_bytes == 12
+
+
+def test_new_file_rebuilt_from_local_hits_is_committed(tmp_path: Path):
+    """NEW 文件即使完全由本地 chunk 重建也属于实际提交."""
+    data = b"aaaa"
+    old = _make_manifest(tmp_path, manifest_id=0x1, raw=b"raw-old")
+    manifest = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw-new")
+    file = _add_file(manifest, "a.bin", [data])
+    _write_local(tmp_path, "a.bin", data)
+    downloaded = _install_fake_network(manifest, [])
+
+    result = asyncio.run(ManifestUpdater(manifest, old_manifest=old, archive=False).sync([file]))
+
+    assert result.actions["a.bin"] is FileAction.NEW
+    assert downloaded == []
+    assert result.downloaded_bytes == 0
+    assert result.reused_bytes == len(data)
+    assert result.committed_files == ["a.bin"]
+
+
+def test_commit_failure_propagates_without_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """提交失败保持原有异常传播语义，不返回不完整结果."""
+    data = b"aaaa"
+    manifest = _make_manifest(tmp_path, manifest_id=0x2, raw=b"raw")
+    _add_file(manifest, "a.bin", [data])
+    _install_fake_network(manifest, [data])
+
+    def broken_commit(output):
+        raise PermissionError("mock commit failure")
+
+    monkeypatch.setattr("riotmanifest.update.updater.commit_staging", broken_commit)
+
+    with pytest.raises(PermissionError, match="mock commit failure"):
+        asyncio.run(ManifestUpdater(manifest).sync())
+    assert not (tmp_path / "a.bin").exists()

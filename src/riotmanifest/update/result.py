@@ -43,6 +43,10 @@ class UpdateResult:
         failures: bundle 维度的下载失败详情（文件视角见 `failed`）。
             `error` 为重试耗尽后的包装异常，底层原因沿 `__cause__` 链保留。
         verify_only: 本次是否为 VERIFY_ONLY 运行。
+        committed_files: 收尾阶段经 staging 成功提交到目标路径的清单文件名。
+            只统计本轮真实写盘的文件；完全命中的 PATCH、REMOVE 和下载失败文件
+            不计入。顺序与计划内文件顺序一致，同一路径最多出现一次。
+            VERIFY_ONLY 恒为空列表。`actions` 仍保留计划口径。
     """
 
     actions: dict[str, FileAction] = field(default_factory=dict)
@@ -53,3 +57,4 @@ class UpdateResult:
     failed: list[str] = field(default_factory=list)
     failures: list[BundleJobFailure] = field(default_factory=list)
     verify_only: bool = False
+    committed_files: list[str] = field(default_factory=list)

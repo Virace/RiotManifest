@@ -154,3 +154,21 @@ def test_sync_many_partial_failure_isolated_per_target(tmp_path: Path):
 
 def test_sync_many_empty_targets_returns_empty():
     assert asyncio.run(sync_many([])) == []
+
+
+def test_sync_many_committed_files_split_per_target(tmp_path: Path):
+    """每个 target 只返回自己的成功提交路径."""
+    lcu_data, game_data = b"aaaa", b"bbbb"
+    lcu = _make_manifest(tmp_path / "lcu", manifest_id=0x1, raw=b"raw-lcu")
+    _add_file(lcu, "client.dat", [lcu_data], bundle_id=0x1001)
+    game = _make_manifest(tmp_path / "game", manifest_id=0x2, raw=b"raw-game")
+    _add_file(game, "Game/data.wad", [game_data], bundle_id=0x2002)
+
+    _install_fake_network(lcu, [lcu_data])
+    _install_fake_network(game, [game_data], fail_bundles={0x2002})
+
+    results = asyncio.run(sync_many([SyncTarget(manifest=lcu), SyncTarget(manifest=game)]))
+
+    assert results[0].committed_files == ["client.dat"]
+    assert results[1].committed_files == []
+    assert results[1].failed == ["Game/data.wad"]
