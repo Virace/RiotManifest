@@ -1,6 +1,6 @@
 [project]
 name = "riotmanifest"
-version = "2.10.0"
+version = "2.10.1"
 description = "Riot manifest parsing, concurrent downloader, and manifest/WAD diff toolkit."
 authors = [
     { name = "Virace", email = "Virace@aliyun.com" }
@@ -11,7 +11,7 @@ dependencies = [
     "aiohttp>=3.14.3",
     "urllib3>=2.7.0",
     "blake3>=1.0.9",
-    "league-tools>=1.2.0",
+    "league-tools>=1.2.1",
 ]
 readme = "README.md"
 license = "GPL-3.0-only"

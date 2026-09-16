@@ -1201,7 +1201,7 @@ wheels = [
 
 [[package]]
 name = "riotmanifest"
-version = "2.10.0"
+version = "2.10.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -1230,7 +1230,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
     { name = "blake3", specifier = ">=1.0.9" },
     { name = "dnspython", marker = "extra == 'edge'", specifier = ">=2.8" },
-    { name = "league-tools", specifier = ">=1.2.0" },
+    { name = "league-tools", specifier = ">=1.2.1" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "pyzstd", specifier = ">=0.19.1" },
     { name = "urllib3", specifier = ">=2.7.0" },
