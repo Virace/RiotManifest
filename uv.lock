@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 
 [manifest]
@@ -1201,7 +1201,7 @@ wheels = [
 
 [[package]]
 name = "riotmanifest"
-version = "2.10.2"
+version = "2.10.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -1228,7 +1228,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
-    { name = "blake3", specifier = ">=1.0.9" },
+    { name = "blake3", specifier = ">=1.0.10" },
     { name = "dnspython", marker = "extra == 'edge'", specifier = ">=2.8" },
     { name = "league-tools", specifier = ">=1.2.1" },
     { name = "loguru", specifier = ">=0.7.3" },
