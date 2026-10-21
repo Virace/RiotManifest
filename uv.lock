@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.10"
 
 [manifest]
@@ -695,7 +695,7 @@ wheels = [
 
 [[package]]
 name = "league-tools"
-version = "1.2.1"
+version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "loguru" },
@@ -705,9 +705,9 @@ dependencies = [
     { name = "xxhash" },
     { name = "zstd" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/27/df/e3205c953429fd41d2f654898eb19d0257d5d679d1ac619f37b2123c923f/league_tools-1.2.1.tar.gz", hash = "sha256:9321d3c733cc7bcdc978de636184b560e424ee4b9e43a050030aaedfcefb98f6", size = 135116, upload-time = "2026-09-10T17:46:36.857Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/ef/ce4ff86dd715ec50ed29f79a84bd3ffa735dd51a12095295575913406c78/league_tools-1.2.2.tar.gz", hash = "sha256:af52c20e94a2563fd5b10cfb6e5acbc34fc9e465b9eb1a897e2eefb1e63e6a22", size = 135795, upload-time = "2026-10-12T10:17:59.219Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/67/8b/61b807a1db4ffa974b08963cf4de2861719c725c9c6c66f0fae08ac4d8b0/league_tools-1.2.1-py3-none-any.whl", hash = "sha256:191ed05f35c117851d590ba7dcd4677438599f1f5dbe6731eb1458d053c83282", size = 102326, upload-time = "2026-09-10T17:46:35.491Z" },
+    { url = "https://files.pythonhosted.org/packages/31/2e/2de73f5f4a9c9e1d78407f94cb1b52118c80df7e3f2a8e786339fd049a6a/league_tools-1.2.2-py3-none-any.whl", hash = "sha256:be0e2b28f6f2d5f85b6683de11f19e68e3b2c8f9a3c4a6877fd2cd8033bd53b9", size = 102763, upload-time = "2026-10-12T10:17:57.574Z" },
 ]
 
 [[package]]
